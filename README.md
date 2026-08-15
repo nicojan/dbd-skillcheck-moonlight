@@ -1,259 +1,130 @@
-# Disclaimer
+# dbd-skillcheck-moonlight
 
-**This project is intended for research and educational purposes in the field of deep learning and how computer vision AI can help in video games.**
+A macOS fork of [Manuteaa/dbd_autoSkillCheck](https://github.com/Manuteaa/dbd_autoSkillCheck), rebuilt to watch a Dead by Daylight session streamed from a Windows host over [Moonlight](https://moonlight-stream.org/) rather than one running on the same machine.
 
-Using it may violate game rules and trigger anti-cheat detection. The author is not responsible for any consequences resulting from its use, this includes bans or any other unspecified violations. Use at your own risk. Join the [discord server](#acknowledgments) for more details about how to test it, after accepting the fair-use agreement.
+Upstream is Windows-only, and it assumes the game and the watcher share a computer. Both assumptions break here. Almost everything in this fork follows from that.
 
-You are free to use or modify this software, but you must strictly adhere to the terms of the GNU General Public License v3.0 (GPLv3).
-If you are distributing or selling a compiled version of this tool, you must:
-1. State clearly that it is based on this repository and include the original copyright notice.
-2. Provide a copy of the GPLv3 license to your users.
-3. Make the full source code available to anyone you distribute it to, under the exact same GPLv3 license.
+This is closer to a measurement rig than a finished bot. It reliably hits wiggle checks and reliably misses Great on repair and heal, for a reason that turns out to be arithmetic.
 
-Taking this code, closing the source, stripping the attribution, and selling it as your own proprietary software is a direct violation of the license and copyright law.
+## Status
 
-# DBD Auto Skill Check
+Working: window targeting, focus gating, detection, key delivery through the stream, wiggle skill checks.
 
-The Dead by Daylight Auto Skill Check is a tool developed using AI (deep learning with PyTorch) to automatically detect and successfully hit skill checks in the popular game Dead by Daylight.
-This tool is designed to demonstrate how AI can improve gameplay performance and enhance the player's success rate in the game.
+Broken: repair and heal checks land in **Good**, never **Great**.
 
+We measured the Great zone off the drawn pixels of 13 deliberately missed checks. It is **10.5 degrees wide**. At our median sweep rate of 320 deg/s the needle crosses that band in 33 ms, and across every rate we have recorded, up to the 406 deg/s ceiling Hyperfocus can reach, the window runs 26 to 37 ms. Our keypress-to-pixel round trip is **72 ms**, median of six trials that spanned 8 ms.
 
-| Demo (x2 speed) |
-|-------------------------------------------------------------------|
-| ![demo](images/demo.gif "demo")                                   |
+The needle has therefore left the zone before the key arrives. No setting recovers those milliseconds. Upstream ships a delay dial (the hit-ante option). Raising it made results worse, which is how we learned that the Great band hugs the *leading* edge of the success zone. The dial was already at the end of its travel.
 
+Pressing early against a predicted position is the only thing left that can work. That tracker is the next piece of work. Everything it rests on has been checked against more than a hundred recorded checks, and the notes below say where those recordings live.
 
-<!-- TOC -->
-* [Disclaimer](#disclaimer)
-* [DBD Auto Skill Check](#dbd-auto-skill-check)
-* [Features](#features)
-* [Execution Instructions](#execution-instructions)
-  * [Get the code](#get-the-code)
-    * [Python embedded app](#python-embedded-app)
-    * [Build from source](#build-from-source)
-  * [Auto skill-check Web UI](#auto-skill-check-web-ui)
-* [Project details](#project-details)
-  * [What is a skill check](#what-is-a-skill-check)
-  * [Dataset](#dataset)
-  * [Architecture](#architecture)
-  * [Training](#training)
-  * [Inference](#inference)
-  * [Results](#results)
-* [FAQ](#faq)
-* [Acknowledgments](#acknowledgments)
-<!-- TOC -->
+## What differs from upstream
 
-# Features
-- Real-time detection of skill checks (120fps)
-- High accuracy of the AI model in recognizing **all types of skill checks (with a 98.7% precision, see details of [Results](#results))**
-- Automatic triggering of great skill checks through auto-pressing the space bar
-- A webUI to run the AI model
-- A GPU mode and a slow-CPU-usage mode to reduce CPU overhead
+| Area | Upstream | Here |
+|---|---|---|
+| Platform | Windows, `win32 SendInput` | macOS, pyautogui behind a dispatcher |
+| Windows path | the only path | kept intact in `directkeys_win.py` |
+| Capture | fixed display region | the Moonlight window, letterbox stripped |
+| Crop | fixed pixels | scaled from *content* height |
+| Firing | on any Great classification | gated on the stream holding focus |
+| Purpose | play the game | measure it, then play it |
 
-What's in the **beta V4 release** (only available in the discord server for now):
-- A brand-new **AI model trained on updated data**, offering improved accuracy and supporting perks: 1, 2, 3, 4 / Decisive Strike / Oppression. Add-on: Brand New Part
-- A lighter CPU-optimized version of the AI model (1.5 MB) using 8-bit integer quantization
-- A GPU-optimized version of the AI model (6 MB) using CUDA or cuML
-- A new user interface 
-- A simpler, more accessible way to enable GPU mode
-- Some options to customize the AI settings, especially helpful for older hardware
+The trained model, its eleven-class taxonomy, and the whole training pipeline under `dbd/` are upstream's work, untouched. Three upstream Python files carry edits. The other 3,600 lines are new.
 
+## Setup
 
-# Execution Instructions
+You need Python 3.12. System Python on recent macOS is 3.14, which is too new for the torch path.
 
-## Get the code
+```bash
+git clone https://github.com/nicojan/dbd-skillcheck-moonlight
+cd dbd-skillcheck-moonlight
+git lfs pull
+python3.12 -m venv .venv
+.venv/bin/pip install numpy mss onnxruntime pyautogui IPython pillow gradio opencv-python pyobjc-framework-ApplicationServices
+```
 
-We provide a simple web interface to configure and run the AI model. When running, it will monitor a small portion of the selected screen and automatically hit the space bar when a great skill check is detected. The screen analysis is done in real time locally on your computer.
-- [From the python embedded app](#python-embedded-app-recommended): Recommended and easiest way to run the AI model without installing anything.
-- [From source](#build-from-source): Recommended if you want to customize the code or run it on GPU.
-- Go to the discord server to access to the new V4 release! It will be publicly released in this repo after a beta period in the discord server.
+Run `git lfs pull` even if cloning seemed to work. `models/model.onnx` is a Git LFS object, and a plain clone leaves you with a 132-byte pointer file that fails at load time with `INVALID_PROTOBUF`. This catches everyone once.
 
+Grant Accessibility permission to whichever terminal you launch from; that is what lets the process inject keys. Without it they go nowhere, and nothing reports an error. Switch terminals and you need a fresh grant.
 
-### Python embedded app
+Training dependencies (torch, torchvision, pytorch-lightning, torchmetrics, about 2.5 GB) are deliberately absent. Nothing in the capture, inference, or keypress path touches them.
 
-This is the recommended method to run the AI model. You don't need to install anything, and don't need any Python knowledge.
+## Running it
 
-1) Go to the [releases page](https://github.com/Manuteaa/dbd_autoSkillCheck/releases) and go to the **latest** release (at least v3.0)
-2) Download `dbd_autoSkillCheck.zip` and unzip it
-3) Run `run_app.bat` (double click) to start the AI model web UI. You can safely run it (ignore the windows warning message). If you do not feel 100% comfortable with it, just read the content of the `.bat` file, copy and paste the single line in a terminal to run it manually.
-4) Follow the [next instructions](#auto-skill-check-web-ui)
+Start Moonlight and make it fullscreen. Then:
 
+```bash
+.venv/bin/python tools/autorun.py --dry-run        # detect and log, press nothing
+.venv/bin/python tools/autorun.py                  # armed
+.venv/bin/python tools/autorun.py --pin-geometry   # freeze the box after the first lock
+```
 
-### Build from source
+Pin the geometry if the window has ever moved mid-session. Moonlight registers about sixteen windows, one of them a 1280x628 decoy that clears the size floor, and a refresh firing mid Space-transition once latched a menu-bar-inset window that gave a 218 pixel crop instead of 224.
 
-Use this method if you have some experience with Python and if you want to customize the code. This is also the only way to run the code using your GPU device (see [FAQ](#faq)).
+Upstream's Gradio web UI still runs through `python app.py`, with a `moonlight` capture backend added.
 
-1) Create your own python env (for example using python 3.12)
-2) Install the minimal necessary libraries using the command: `pip install numpy mss onnxruntime pyautogui IPython pillow gradio opencv-python`
-3) git clone the repo or download the source code (zip)
-4) Run `python app.py` to start the AI model web UI
-5) Follow the [next instructions](#auto-skill-check-web-ui)
+Read this twice: EAC can treat injected input as an unfair advantage, and accounts get banned for it. Upstream restricts the tool to private games. This fork does nothing to improve those odds.
 
+## Tools
 
-## Auto skill-check Web UI
+Thirteen small programs, all of them offline and replayable against recorded frames. None of them need the game running.
 
-After having started the AI model web UI, a console will open, ctrl+click on the [local URL displayed in the console](http://127.0.0.1:7860) to open the local web UI.
+| Tool | What it does |
+|---|---|
+| `autorun.py` | the detect and fire loop, focus-gated |
+| `calibrate_window.py` | draws the capture box on a frame so you can see the framing |
+| `measure_latency.py` | keypress to pixel round trip |
+| `test_keypress.py` | isolates whether synthetic keys reach the host at all |
+| `record_checks.py` | clean 224-pixel frame sequences of individual checks |
+| `record_frames.py` | full frames at 30 fps with no inference, for offline work |
+| `analyse_needle.py` | needle angle per frame, and how constant the sweep rate is |
+| `measure_zone.py` | Great and Good widths straight from the drawn pixels |
+| `sweep_rates.py` | per-check rate and fit quality across a whole session |
+| `scan_frames.py` | offline tile sweep, for finding checks outside the centre crop |
+| `ingest_video.py` | turns a downloaded gameplay clip into the same dataset format |
+| `wide_scan.py` | slides a 224 window over a frame to find where checks appear |
+| `prune_frames.py` | deletes frames far from any detected check |
 
-1) Select the trained AI model (default to `model.onnx` available in this repo)
-2) Select the device to use. Use default CPU device. GPU is only available using the [Build from source method](#build-from-source)
-3) Select your monitor, and verify on the right panel that the displayed image matches the monitor where you will play the game. For best AI model performance, use a monitor with a resolution of 1920x1080
-4) Configure additional features options (check the [FAQ](#faq) more for details)
-5) Click **RUN**! It will now monitor your screen and hit the space bar for you
-6) You can **STOP** and **RUN** the tool from the Web UI at will, for example when waiting in the game lobby
+`ingest_video.py` earns its place. Five live sessions produced no Doctor and no Merciless Storm, so those game states stayed unmeasured for a week. One downloaded clip of another player, rescaled and ingested, produced four Madness checks and four counter-clockwise ones on the first run. Downloaded footage also fits far cleaner than our own, 0.44 to 2.7 deg RMS against 2.1 to 5.3, because no stream encoder sits in the path.
 
-When running, your screen is monitored meaning that frames are regularly sampled (with a 224x224 center-crop) and analysed locally (on your computer) with our AI model. You can now play the game. When a great skill check is detected, the SPACE key is automatically pressed, then it waits for 0.5s to avoid triggering the same skill check multiple times in a row.
+## What we measured
 
+Numbers are from a 2560x1080 ultrawide, Moonlight fullscreen, the stream pillarboxed to 1920x1080.
 
-| Auto skill check example 1            | Auto skill check example 2            |
-|---------------------------------------|---------------------------------------|
-| ![](images/run_1.png "Example run 1") | ![](images/run_2.png "Example run 2") |
+| Quantity | Value |
+|---|---|
+| Capture (`mss`) | 21.9 ms per frame, about 90% of the frame budget |
+| Inference | 2.0 to 2.5 ms per frame |
+| Live throughput | 34 fps (upstream targets 120) |
+| Keypress to pixel | 72 ms median |
+| Capture cost, 224 px vs full frame | 22.2 ms vs 26.9 ms, so 4.7 ms buys 41 times the pixels |
+| Needle sweep rate | 291 to 328 deg/s, median 320 (standard play); 214 to 440 on a faster build |
+| Angle fit residual | 2.1 to 5.3 deg RMS on our captures, 0.44 to 2.7 on native 60 fps footage |
+| Great zone, from pixels | 10.5 deg, range 10.0 to 10.5 across 13 checks |
+| Success zone, from pixels | 49.5 deg total, Great at the leading edge in 13 of 13 |
 
+The syscall dominates capture cost, which barely moves with region size. Shrinking the capture region cannot buy frame rate; widening it is nearly free, which is what makes off-centre Doctor checks tractable.
 
-On the right of the web UI, we display :
-- The AI model FPS : the number of frames per second the AI model processes
-- The last hit skill check frame : last frame the AI model triggered the SPACE bar. **This may not be the actual hit frame (as registered by the game) because of game latency (such as ping). The AI model anticipates the latency, and hits the space bar a little bit before the cursor reaches the great area, that's why the displayed frame will always be few frames before actual game hit frame**
-- Skill check recognition : set of probabilities for the frame displayed above
+`NOTES-local.md` holds the full record: every measurement, what was ruled out, and the failure modes that produced a confident wrong answer before anyone noticed. Read its "Resume here" section first.
 
-**Both the game AND the AI model FPS must run at a minimum of 60fps in order to hit correctly the great skill checks.**
+## Things that will bite you
 
-# Project details
+These each cost a day.
 
-## What is a skill check
+**`NSWorkspace.frontmostApplication()` caches and never refreshes** without a Cocoa run loop. It reported iTerm2 for sixty straight seconds while Moonlight was fullscreen and focused. It looks correct in short-lived test scripts and fails in the long-running loop that matters. `focus_watcher.py` queries `CGWindowList` instead.
 
-A skill check is a game mechanic in Dead by Daylight that allows the player to progress faster in a specific action such as repairing generators or healing teammates.
-It occurs randomly and requires players to press the space bar to stop the progression of a red cursor.
+**A fullscreen app lives on its own macOS Space.** `kCGWindowListOptionOnScreenOnly` only reports the active Space, so fullscreen Moonlight is invisible to that query from another desktop. Window lookup has to use `kCGWindowListOptionAll`.
 
-Skill checks can be:
-- failed, if the cursor misses the designated white zone (the hit area)
-- successful, if the cursor lands in the white zone
-- or greatly successful, if the cursor accurately hits the white-filled zone
+**The 224 pixel crop is not arbitrary.** It is `224/1080 * content_height`, because the model was trained on checks occupying a fixed fraction of a 1080p frame. Feed it the whole window and the check shrinks to a fifth of its trained height and distorts into an ellipse.
 
-Here are examples of different great skill checks:
+**A hit freezes the needle, and frame-equality will not detect it.** The game stops the needle dead on a successful hit, but the stream encoder keeps jittering pixels, so consecutive frames differ while the angle is bit-for-bit identical. An early attempt tested frame content for equality, never fired, and left frozen tails in the velocity fit; four of thirteen checks then looked like they had non-constant angular velocity. Detect the freeze by the needle failing to advance instead.
 
-|     Repair-Heal skill check     |       Wiggle skill check        |       Full white skill check        |        Full black skill check         |
-|:-------------------------------:|:-------------------------------:|:-----------------------------------:|:-------------------------------------:|
-| ![](images/repair.png "repair") | ![](images/wiggle.png "wiggle") | ![](images/struggle.png "struggle") | ![](images/merciless.png "merciless") |
+**A confident class is not a check detector.** The model returns `repair-heal (out)` at 1.000 confidence on a red-ringed perk icon in the loadout menu, and labels the check-free frames either side of a real check `full black (out)` rather than `None`. Confidence is therefore useless as a filter. The class the model assigns is the only thing standing between a stray perk icon and a wrong keypress, and that is thinner protection than it looks.
 
-Successfully hitting a skill check increases the speed of the corresponding action, and a greatly successful skill check provides even greater rewards.
-On the other hand, missing a skill check reduces the action's progression speed and alerts the ennemi with a loud sound.
+**Never measure game geometry through the classifier.** The span of frames labelled `great` gives about 40 degrees, three times the drawn zone, which is wide enough to have wrongly overturned the conclusion in the Status section. That label is a hand-annotated "press about here" cue with margin baked in. Measure pixels.
 
+## Licence and credit
 
-## Dataset
-We designed a custom dataset from in-game screen recordings and frame extraction of gameplay videos on youtube.
-To save disk space, we center-crop each frame to size 320x320 before saving.
+GPL-3.0, inherited from upstream and unchanged. If you redistribute this, in source or compiled form, you carry the same obligations: state that it derives from [Manuteaa/dbd_autoSkillCheck](https://github.com/Manuteaa/dbd_autoSkillCheck), keep the copyright notice, ship the licence, and make the source available under GPL-3.0.
 
-The data was manually divided into 11 separate folders based on :
-- The visible skill check type : Repairing/healing, struggle, wiggle and special skill checks (overcharge, merciless storm, etc.) because the skill check aspects are different following the skill check type
-- The position of the cursor relative to the area to hit : outside, a bit before the hit area and inside the hit area.
-
-**We experimentally made the conclusion that following the type of the skill check, we must hit the space bar a bit before the cursor reaches the great area, in order to anticipate the game input processing latency.
-That's why we have this dataset structure and granularity (with ante-frontier and frontier areas recognition).**
-
-To alleviate the laborious collection task, we employed data augmentation techniques such as random rotations, random crop-resize, and random brightness/contrast/saturation adjustments.
-
-We developed a customized and optimized dataloader that automatically parses the dataset folder and assigns the correct label to each image based on its corresponding folder.
-Our data loaders use a custom sampler to handle imbalanced data.
-
-## Architecture
-The skill check detection system is based on an encoder-decoder architecture.
-
-We employ the MobileNet V3 Small architecture, specifically chosen for its trade-off between inference speed and accuracy.
-This ensures real-time inference and quick decision-making without compromising detection precision.
-We also compared the architecture with the MobileNet V3 Large, but the accuracy gain was not worth a bigger model size (20Mo instead of 6Mo) and slower inference speed.
-
-We had to manually modify the last layer of the decoder. Initially designed to classify 1000 different categories of real-world objects, we switched it to an 11-categories layer.
-
-## Training
-
-We use a standard cross entropy loss to train the model and monitor the training process using per-category accuracy score.
-
-I trained the model using my own computer, and using the AWS _g6.4xlarge_ EC2 instance (around x1.5 faster to train than on my computer).
-
-
-## Inference
-We provide a script that loads the trained model and monitors the main screen.
-For each sampled frame, the script will center-crop and normalize the image then feed it to the AI model.
-
-Following the result of the skill check recognition, the script will automatically press the space bar to trigger the great skill check (or not),
-then it waits for a short period of time to avoid triggering the same skill check multiple times in a row.
-
-To achieve real time results, we convert the model to ONNX format and use the ONNX runtime to perform inference.
-We observed a 1.5x to 2x speedup compared to baseline inference.
-
-## Results
-
-We test our model using a testing dataset of ~2000 images:
-
-| Category Index | Category description        | Mean accuracy |
-|----------------|-----------------------------|---------------|
-| 0              | None                        | 100.0%        |
-| 1              | repair-heal (great)         | 99.5%         |
-| 2              | repair-heal (ante-frontier) | 96.5%         |
-| 3              | repair-heal (out)           | 98.7%         |
-| 4              | full white (great)          | 100%          |
-| 5              | full white (out)            | 100%          |
-| 6              | full black (great)          | 100%          |
-| 7              | full black (out)            | 98.9%         |
-| 8              | wiggle (great)              | 93.4%         |
-| 9              | wiggle (frontier)           | 100%          |
-| 10             | wiggle (out)                | 98.3%         |
-
-
-During our laptop testing, we observed rapid inference times of approximately 10ms per frame using MobileNet V3 Small.
-When combined with our screen monitoring script, we achieved a consistent 120fps detection rate, which is enough for real-time detection capabilities.
-
-In conclusion, our model achieves high accuracy thanks to the high-quality dataset with effective data augmentation techniques, and architectural choices.
-**The RUN script successfully hits the great skill checks with high confidence.**
-
-# FAQ
-
-**What about the anti-cheat system ?**
-- The script monitors a small crop of your main screen, processes it using an onnx model, and can press then release the space bar using [Windows MSDN](https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes?redirectedfrom=MSDN) once each 0.5s maximum. This win32 `SendInput` injection key can be considered as an "unfair advantage" by EAC, potentially leading to a ban. For this reason, the script should only be used in private games. However, if you still wish to use it in public matches, you can join the Discord server for more details. These specifics will not be shared publicly and will only be available after accepting the fair-use agreement.
-
-**How to run the AI model with your GPU (NVIDIA - CUDA)?**
-- Uninstall `onnxruntime` then install `onnxruntime-gpu`
-- Check onnxruntime-gpu version compatibilities with CUDA, CUDNN and torch https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements
-- Install [CUDA](https://developer.nvidia.com/cuda-downloads)
-- Install [CUDNN](https://developer.nvidia.com/cudnn) matching your cuda version
-- Install [torch](https://pytorch.org/get-started/locally/) with CUDA compute
-- Select "GPU" in the Auto skill check webUI, click "RUN"
-- Install last version of MSVC if you encounter an error
-- _Note for advanced users: We also provide a tensorRT model support. Install the necessary tensorRT libs, convert the .onnx model into an optimized .trt model and select it with GPU mode from the WebUI._ 
-
-**How to run the AI model with your GPU (AMD - DirectML)**
-- Install torch with CPU compute `pip install torch`
-- Uninstall `onnxruntime` then install `onnxruntime-directml`
-- Select "GPU" in the Auto skill check webUI, click "RUN"
-
-**Why do I hit good skill checks instead of great ?**
-- Best performance is achieved when both the game and the AI model run around 120fps (or more).
-- Check if your ping is not too high
-- Disable all your game filters/reshade, disable vsync and disable FSR
-- In the `Features options` of the WebUI, decrease (closer to 0) the `Ante-frontier hit delay` value
-
-**I want to increase the AI model FPS, what can I do ?**
-- Use performance mode on your windows battery settings
-- Run the app with a higher priority in the task manager
-- Close all unnecessary applications running in the background and decrease the game graphics settings
-- In the `Features options` of the WebUI, increase the `CPU workload`. Note that you should adapt the value depending on your hardware, because highest values can lower performance on low-end CPU.
-- Set both your monitor & game resolution to 1920x1080 at 100% scale
-- Increase all your monitors refresh rate (120Hz for example)
-- Switch device to gpu
-
-**Why does the AI model hit the skill check too early and fail ?**
-- In the `Features options` of the WebUI, increase the `Ante-frontier hit delay` value
-
-**Does the script work well with the perk hyperfocus ?**
-- Yes
-
-**How to fix the error `[ONNXRuntimeError] : 7 : INVALID_PROTOBUF : Load model from models/model.onnx failed:Protobuf parsing failed.` ?**
-- Sometimes Github downloads an empty .onnx file (with a size of 0ko or 1ko in the folder `models/`). Just re-download the [file](https://github.com/Manuteaa/dbd_autoSkillCheck/blob/main/models/model.onnx) and replace the empty one with the one you just downloaded.
-
-# Acknowledgments
-
-The project was made and is maintained by me ([Manuteaa](https://github.com/Manuteaa)). If you enjoy this project, consider giving it a ⭐! Starring the repository helps others discover it, and shows support for the work put into it. Your stars motivate me to add new features and address any bugs.
-
-Feel free to open a new issue for any question, suggestion or issue. You can also join the discord server https://discord.gg/3mewehHHpZ for more info and help.
-
-- A big thanks to [hemlock12](https://github.com/hemlock12) for the data collection help !
-- Thanks to Aaron for the big help with the discord server !
+The model, the dataset design, the training code, and the original tool are [Manuteaa's](https://github.com/Manuteaa). This fork only moves it to a different machine and takes a lot of measurements. Their [Discord](https://discord.gg/3mewehHHpZ) is where the upstream project is discussed; questions about this fork belong in this repository's issues.
