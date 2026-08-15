@@ -7,6 +7,13 @@ from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils.monitoring_mss import Monitoring_mss
 
 try:
+    from dbd.utils.monitoring_window import Monitoring_window
+    window_capture_ok = True
+    print("Info: window-targeted capture available (moonlight).")
+except ImportError:
+    window_capture_ok = False
+
+try:
     from dbd.utils.monitoring_bettercam import Monitoring_bettercam
     bettercam_ok = True
     print("Info: Bettercam feature available.")
@@ -30,12 +37,18 @@ def monitor(ai_model_path, device, monitoring_str, monitor_id, hit_ante, nb_cpu_
     if device is None:
         raise gr.Error("Invalid device option")
 
-    if monitor_id is None:
+    # Window capture resolves its own geometry, so no monitor selection is needed
+    if monitor_id is None and not (monitoring_str == "moonlight" and window_capture_ok):
         raise gr.Error("Invalid monitor option")
 
     use_gpu = (device == devices[1])
 
-    if monitoring_str == "bettercam" and bettercam_ok:
+    if monitoring_str == "moonlight" and window_capture_ok:
+        # Track the Moonlight window rather than a fixed display region, so the crop
+        # follows the stream if the window is moved, resized or windowed.
+        monitoring = Monitoring_window(window_query="Moonlight", crop_size=224)
+        print("Window capture geometry:", monitoring.describe())
+    elif monitoring_str == "bettercam" and bettercam_ok:
         monitoring = Monitoring_bettercam(monitor_id=monitor_id, crop_size=224, target_fps=240)
     else:
         monitoring = Monitoring_mss(monitor_id=monitor_id, crop_size=224)
@@ -62,8 +75,22 @@ def monitor(ai_model_path, device, monitoring_str, monitor_id, hit_ante, nb_cpu_
     t0 = time()
     nb_frames = 0
 
+    # Only inject keys while the stream is focused — otherwise SPACE lands in whatever
+    # app you switched to. Window capture implies a focusable target, so gate on it.
+    focus_watcher = None
+    if monitoring_str == "moonlight" and window_capture_ok:
+        from dbd.utils.focus_watcher import FocusWatcher
+        focus_watcher = FocusWatcher(query="Moonlight")
+
     try:
         while True:
+            if focus_watcher is not None and not focus_watcher.is_active():
+                ReleaseKey(SPACE)  # never leave the key held in another app
+                sleep(0.2)
+                t0 = time()
+                nb_frames = 0
+                continue
+
             frame_np = ai_model.grab_screenshot()
             nb_frames += 1
 
@@ -114,9 +141,16 @@ if __name__ == "__main__":
         raise gr.Error(f"No AI model found in {models_folder}/", duration=0)
 
     # Monitoring
-    monitoring_choices = ["mss", "bettercam"] if bettercam_ok else ["mss"]
+    monitoring_choices = ["mss"]
+    if bettercam_ok:
+        monitoring_choices.append("bettercam")
+    if window_capture_ok:
+        monitoring_choices.append("moonlight")
+
     def switch_monitoring_cb(monitoring_str):
-        if monitoring_str == "bettercam" and bettercam_ok:
+        if monitoring_str == "moonlight" and window_capture_ok:
+            monitor_choices = Monitoring_window.get_monitors_info()
+        elif monitoring_str == "bettercam" and bettercam_ok:
             monitor_choices = Monitoring_bettercam.get_monitors_info()
         else:
             monitor_choices = Monitoring_mss.get_monitors_info()
@@ -126,6 +160,9 @@ if __name__ == "__main__":
     # Monitor selection
     monitor_choices = Monitoring_mss.get_monitors_info()
     def switch_monitor_cb(monitoring_str, monitor_id):
+        if monitoring_str == "moonlight" and window_capture_ok:
+            with Monitoring_window(window_query="Moonlight", crop_size=520) as mon:
+                return mon.get_frame_np()
         if monitoring_str == "bettercam" and bettercam_ok:
             with Monitoring_bettercam(monitor_id, crop_size=520) as mon:
                 return mon.get_frame_np()

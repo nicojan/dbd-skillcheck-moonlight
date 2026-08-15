@@ -168,8 +168,10 @@ class AI_model:
         self.context = None
         self.engine = None
 
-        self.monitor.stop()
-        self.monitor = None
+        # cleanup() runs from both __exit__ and __del__, so it must be idempotent
+        if self.monitor is not None:
+            self.monitor.stop()
+            self.monitor = None
 
         if self.bindings:
             for binding in self.bindings:
