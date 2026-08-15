@@ -27,10 +27,14 @@ import os
 import cv2
 import numpy as np
 
-CENTRE = 112.0          # frames from record_checks.py are 224x224
+CENTRE_PRIOR = (112.0, 102.0)  # where the ring sits in a 224 crop — NOT the crop's centre
+CENTRE_SPAN = 8.0              # px searched around the prior, per check
+CENTRE_STEP = 0.5
+RING_SEARCH = (45.0, 85.0)
 R_IN, R_OUT = 55, 100   # annulus containing the needle, inside the ring, outside the prompt
 ANGLE_STEP = 0.5
 MIN_NEEDLE_STRENGTH = 20.0
+RELATIVE_FLOOR = 0.5    # of the check's own peak needle response; see drawn_frames()
 ROUND_TRIP_MS = 72.0
 
 
@@ -43,23 +47,85 @@ def parse_args():
     return p.parse_args()
 
 
-def needle_angle(bgr):
+def sample_rays(img, cx, cy, radii):
+    angles = np.arange(0, 360, ANGLE_STEP)
+    theta = np.deg2rad(angles)[:, None]
+    xs = np.clip(np.round(cx + radii[None, :] * np.sin(theta)).astype(int), 0, img.shape[1] - 1)
+    ys = np.clip(np.round(cy - radii[None, :] * np.cos(theta)).astype(int), 0, img.shape[0] - 1)
+    return angles, img[ys, xs]
+
+
+def locate_ring(imgs):
+    """Ring centre for one check, refined the way measure_zone.py does it.
+
+    The angle is measured ABOUT this centre, so an error here lands straight in the angle
+    and then in the velocity fit. Measuring about the crop's centre instead of the ring's
+    inflates the residual roughly tenfold on clean footage — enough to make a needle that
+    holds 300.0 deg/s to half a degree look like it is not moving at constant velocity.
+    The ring is a full circle, so at the true centre its angle-median radial profile is a
+    tall narrow spike; off centre the ring smears across radii and the peak drops.
+    """
+
+    stack = np.stack(imgs).astype(np.float32)
+    b, g, r = stack[..., 0], stack[..., 1], stack[..., 2]
+    whiteness = np.minimum(np.minimum(r, g), b)
+    masked = np.where(r - np.maximum(g, b) > MIN_NEEDLE_STRENGTH, np.nan, whiteness)
+    masked[:, np.all(np.isnan(masked), axis=0)] = 0.0  # never-uncovered pixels
+    ring = np.nanmedian(masked, axis=0)
+
+    radii = np.arange(*RING_SEARCH, CENTRE_STEP)
+    grid = np.arange(-CENTRE_SPAN, CENTRE_SPAN + 1e-9, CENTRE_STEP)
+    best = (-1.0, CENTRE_PRIOR[0], CENTRE_PRIOR[1])
+    for dx in grid:
+        for dy in grid:
+            cx, cy = CENTRE_PRIOR[0] + dx, CENTRE_PRIOR[1] + dy
+            peak = np.median(sample_rays(ring, cx, cy, radii)[1], axis=0).max()
+            if peak > best[0]:
+                best = (peak, cx, cy)
+    return best[1], best[2]
+
+
+def needle_angle(bgr, centre=CENTRE_PRIOR):
     """(angle_deg, strength) of the strongest red radial line. 0 deg = up, clockwise."""
 
     b, g, r = (bgr[:, :, i].astype(np.float32) for i in range(3))
     redness = r - np.maximum(g, b)  # needle is red; the white zone arc cancels out
 
-    angles = np.arange(0, 360, ANGLE_STEP)
-    radii = np.arange(R_IN, R_OUT)
-    theta = np.deg2rad(angles)[:, None]
-    xs = CENTRE + radii[None, :] * np.sin(theta)
-    ys = CENTRE - radii[None, :] * np.cos(theta)
-
-    xi = np.clip(np.round(xs).astype(int), 0, redness.shape[1] - 1)
-    yi = np.clip(np.round(ys).astype(int), 0, redness.shape[0] - 1)
-    profile = redness[yi, xi].mean(axis=1)  # mean along each ray
+    angles, rays = sample_rays(redness, centre[0], centre[1], np.arange(R_IN, R_OUT))
+    profile = rays.mean(axis=1)  # mean along each ray
 
     return float(angles[int(np.argmax(profile))]), float(profile.max())
+
+
+def drawn_frames(rows):
+    """Keep the contiguous block of frames where the needle is actually on screen.
+
+    A fixed strength floor is not enough. The classifier labels check-free frames either
+    side of a real check with a confident class of its own — `full black (out)` on this
+    footage — so those frames survive the `desc == "None"` pre-roll filter and reach the
+    fit, where the brightest stray red pixel supplies a meaningless angle that drifts the
+    opposite way. That was enough to reverse the inferred sweep direction and make the
+    frozen-tail trimmer discard the check on its second frame.
+
+    Judging strength relative to the check's own peak is what generalises: a drawn needle
+    scores 70-125 here and 80-150 on our own captures, while these strays reach 20-45.
+    """
+
+    strengths = np.array([r[2] for r in rows])
+    if not len(strengths):
+        return rows
+    ref = float(np.median(strengths[strengths >= np.percentile(strengths, 75)]))
+    lit = strengths >= max(MIN_NEEDLE_STRENGTH, RELATIVE_FLOOR * ref)
+
+    best, run, start = (0, 0), 0, 0
+    for i, on in enumerate([*lit, False]):
+        if on:
+            start = i if run == 0 else start
+            run += 1
+        else:
+            best, run = max(best, (run, start)), 0
+    length, start = best
+    return rows[start:start + length]
 
 
 def trim_frozen_tail(rows):
@@ -74,13 +140,23 @@ def trim_frozen_tail(rows):
     the angle sits at exactly the same value, so an equality test on the frame content
     never fires. Two consecutive non-advancing frames means the sweep is over; a single
     one can just be angular quantisation at a slow sweep rate.
+
+    "Advance" is signed by the check's own direction. The Doctor's Madness makes a check
+    rotate counter-clockwise, and against a hardcoded clockwise assumption every frame of
+    such a check reads as stalled — so the whole check is thrown away on its second frame,
+    silently, and the reversed checks never reach the fit at all.
     """
+
+    steps = [(b[1] - a[1] + 540) % 360 - 180 for a, b in zip(rows, rows[1:])]
+    if not steps:
+        return rows
+    sign = 1.0 if float(np.median(steps)) >= 0 else -1.0
 
     kept = []
     stalled = 0
     for i, row in enumerate(rows):
         if i > 0:
-            advanced = (row[1] - rows[i - 1][1] + 540) % 360 - 180  # signed, wrap-safe
+            advanced = sign * ((row[1] - rows[i - 1][1] + 540) % 360 - 180)  # wrap-safe
             stalled = stalled + 1 if advanced <= 0 else 0
             if stalled >= 2:
                 break
@@ -96,18 +172,20 @@ def analyse(check_dir, round_trip_ms, verbose=False):
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    rows = []
+    live = []
     for rec in manifest:
         if rec["desc"] == "None":
             continue  # pre-roll, before the check appeared
         img = cv2.imread(os.path.join(check_dir, rec["frame"]))
-        if img is None:
-            continue
-        angle, strength = needle_angle(img)
-        if strength < MIN_NEEDLE_STRENGTH:
-            continue
-        rows.append((rec["t_ms"], angle, strength, rec["desc"]))
+        if img is not None:
+            live.append((rec, img))
+    if len(live) < 6:
+        return {"dir": check_dir, "skip": f"only {len(live)} frames"}
 
+    centre = locate_ring([img for _, img in live])
+
+    rows = [(rec["t_ms"], *needle_angle(img, centre), rec["desc"]) for rec, img in live]
+    rows = drawn_frames(rows)
     rows = trim_frozen_tail(rows)
     if len(rows) < 6:
         return {"dir": check_dir, "skip": f"only {len(rows)} usable frames"}
@@ -125,6 +203,7 @@ def analyse(check_dir, round_trip_ms, verbose=False):
 
     return {
         "dir": check_dir,
+        "centre": centre,
         "frames": len(rows),
         "deg_per_s": slope * 1000.0,
         "rms_deg": rms,
@@ -157,6 +236,8 @@ def main():
             continue
         results.append(r)
         tag = "  wiggle (oscillates, linear fit invalid)" if r["wiggle"] else ""
+        if r["deg_per_s"] < 0:
+            tag = "  COUNTER-CLOCKWISE (Madness)" + tag
         print(f"{name:<14}{r['frames']:>4}{r['deg_per_s']:>9.1f}{r['rms_deg']:>9.2f}"
               f"{r['max_dev_deg']:>9.2f}{r['lead_deg']:>10.1f}{r['err_pct_of_lead']:>9.0f}%{tag}")
 
@@ -164,14 +245,21 @@ def main():
     if not sweeps:
         return
 
-    rates = np.array([r["deg_per_s"] for r in sweeps])
+    rates = np.abs([r["deg_per_s"] for r in sweeps])
+    ccw = [r for r in sweeps if r["deg_per_s"] < 0]
     errs = np.array([r["err_pct_of_lead"] for r in sweeps])
     good = [r for r in sweeps if r["err_pct_of_lead"] < 25]
 
     print(f"\n{len(sweeps)} sweeping checks (wiggle excluded):")
+    spread = (rates.max() - rates.min()) / np.median(rates)
+    note = (" — varies BETWEEN checks, so the rate must be estimated live per check, "
+            "not hardcoded" if spread > 0.05 else
+            " — one rate across this set; do not generalise, other sets vary by 10-30%")
     print(f"  sweep rate spans {rates.min():.0f}-{rates.max():.0f} deg/s "
-          f"(median {np.median(rates):.0f}) — varies BETWEEN checks, so the rate must be "
-          "estimated live per check, not hardcoded")
+          f"(median {np.median(rates):.0f}){note}")
+    if ccw:
+        print(f"  {len(ccw)}/{len(sweeps)} rotate counter-clockwise — the sign of the "
+              "fitted slope is load-bearing, never assume clockwise")
     print(f"  fit error vs required lead: median {np.median(errs):.0f}%, "
           f"{len(good)}/{len(sweeps)} checks under 25%")
     print("  => constant angular velocity holds WITHIN a check; predictive firing is sound"
