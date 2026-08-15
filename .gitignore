@@ -18,3 +18,6 @@ recordings_missed/
 scan_hits/
 
 .DS_Store
+
+# session working state, not shared documentation
+.claude/HANDOFF.md
