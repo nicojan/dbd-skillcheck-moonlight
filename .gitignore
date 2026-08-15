@@ -10,3 +10,11 @@ dist/
 build/
 python-embed*/
 release*/
+
+# local capture data (GBs of frames, not source)
+frames/
+recordings/
+recordings_missed/
+scan_hits/
+
+.DS_Store
