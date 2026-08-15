@@ -21,3 +21,7 @@ scan_hits/
 
 # session working state, not shared documentation
 .claude/HANDOFF.md
+
+# third-party gameplay clips used as a dataset source
+videos/
+recordings_video/
