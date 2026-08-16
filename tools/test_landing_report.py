@@ -183,6 +183,53 @@ def test_the_round_trip_comes_from_where_the_needle_stopped():
           abs((measured - press_ms) - 88.0) < 1.0, f"{measured - press_ms:.1f} ms")
 
 
+def test_a_wrapped_revolution_is_not_reported_as_latency():
+    from dbd.utils.needle_tracker import Fit
+    import autorun
+
+    fit = Fit(rate_deg_s=326.0, intercept=0.0, rms_deg=1.7, n=8)
+    check("a real latency passes", autorun.plausible_round_trip(88.0, fit))
+    # time_to_angle returns the NEXT crossing, so a landing a degree behind the extrapolated
+    # press position comes back as a whole revolution (1104 ms at 326 deg/s) rather than a
+    # value near zero. One of those in a ten-sample median moves it further than the jitter.
+    check("a wrapped revolution does not", not autorun.plausible_round_trip(1104.0, fit))
+    check("nor does a negative", not autorun.plausible_round_trip(-5.0, fit))
+    check("no fit means no verdict", not autorun.plausible_round_trip(88.0, None))
+
+    # The bound scales with the check: half a revolution is 295 ms at the Hyperfocus ceiling.
+    fast = Fit(rate_deg_s=609.0, intercept=0.0, rms_deg=1.7, n=8)
+    check("the bound follows the sweep rate", not autorun.plausible_round_trip(400.0, fast)
+          and autorun.plausible_round_trip(400.0, fit))
+
+
+def test_the_summary_reports_what_it_could_not_measure():
+    import autorun
+    L = autorun.Landing
+
+    check("an empty run says so", "no predictive fire" in autorun.summarise_landings([])[0])
+
+    landings = [
+        L("measured", round_trip_ms=88.0, verdict="GREAT", error_deg=1.0),
+        L("measured", round_trip_ms=96.0, verdict="GREAT", error_deg=-2.0),
+        L("measured", round_trip_ms=104.0, verdict="good", error_deg=4.0),
+        L("still sweeping"),
+        L("needle gone"),
+        L("implausible", verdict="MISS", error_deg=-9.0),
+    ]
+    text = "\n".join(autorun.summarise_landings(landings))
+
+    check("counts scored against fired", "4 of 6 fires scored" in text, text)
+    check("tallies the verdicts", "GREAT 2, good 1, MISS 1" in text, text)
+    check("medians the round trips", "median 96 ms, 88-104 (spread 16), n=3" in text, text)
+    # The censoring is the point: a spread quoted without the checks it dropped reads
+    # tighter than the link is, and the dropped ones are the checks that went worst.
+    check("and names what it could not measure",
+          "1 implausible" in text and "1 needle gone" in text and "1 still sweeping" in text,
+          text)
+    check("the implausible one keeps its verdict but not its number",
+          "median 96 ms" in text and "n=3" in text, text)
+
+
 def test_freeze_onset_agrees_with_freeze_angle():
     # The two must never disagree: a settled angle with no onset (or the reverse) would
     # print a round trip for a landing that was refused, or refuse one we had timed.

@@ -26,7 +26,9 @@ are firing where you expect.
 import argparse
 import os
 import sys
+from dataclasses import dataclass
 from time import monotonic, sleep, strftime
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
 
@@ -138,6 +140,78 @@ def fire(args, wait_ms):
     return pressed_at
 
 
+@dataclass(frozen=True)
+class Landing:
+    """What one predictive fire turned into. `outcome` names why, when there is no number."""
+
+    outcome: str
+    round_trip_ms: Optional[float] = None
+    verdict: Optional[str] = None
+    error_deg: Optional[float] = None
+
+
+def plausible_round_trip(round_trip_ms, fit):
+    """Is this a latency, or a wrapped revolution wearing one's clothes?
+
+    `time_to_angle` returns the NEXT time the needle reaches the settled angle. A landing a
+    degree or two BEHIND the extrapolated press position — which fit error alone produces,
+    at 1.7-2.0 deg RMS — therefore comes back as a whole revolution rather than a value near
+    zero. Half a revolution is 552 ms at the median 326 deg/s and 295 at the Hyperfocus
+    ceiling, both far above any latency this link has shown, so anything past it is the wrap
+    rather than a slow press. Flagged and excluded from the median, never silently averaged
+    in: one bogus 1100 would move a ten-sample median more than the jitter being measured.
+    """
+
+    if fit is None or abs(fit.rate_deg_s) < 1e-6:
+        return False
+    return 0.0 <= round_trip_ms <= 180.0 / abs(fit.rate_deg_s) * 1000.0
+
+
+def median(values):
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if not ordered:
+        return None
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def summarise_landings(landings):
+    """Lines summarising a run's landings. Pure, so the arithmetic can be tested.
+
+    Reports the checks that produced NO reading alongside those that did. The sample is
+    censored — a press that never registers leaves no freeze to measure — and censored in
+    the direction that flatters the result, since the checks it drops are the ones that went
+    worst. A spread quoted without the count it excluded reads tighter than the link is.
+    """
+
+    if not landings:
+        return ["landings: none — no predictive fire reached a landing"]
+
+    read = [l for l in landings if l.round_trip_ms is not None]
+    verdicts = [l.verdict for l in landings if l.verdict]
+    trips = [l.round_trip_ms for l in read]
+    errors = [l.error_deg for l in landings if l.error_deg is not None]
+
+    tally = ", ".join(f"{v} {verdicts.count(v)}" for v in ("GREAT", "good", "MISS")
+                      if verdicts.count(v))
+    lines = [f"landings: {len(verdicts)} of {len(landings)} fires scored"
+             + (f" — {tally}" if tally else "")]
+
+    if trips:
+        lines.append(f"  round trip: median {median(trips):.0f} ms, {min(trips):.0f}-"
+                     f"{max(trips):.0f} (spread {max(trips) - min(trips):.0f}), n={len(trips)}")
+    if errors:
+        lines.append(f"  landing error: median {median(errors):+.1f} deg, "
+                     f"{min(errors):+.1f} to {max(errors):+.1f} — negative is early, "
+                     f"the expensive direction")
+
+    missed = [l.outcome for l in landings if l.round_trip_ms is None]
+    if missed:
+        lines.append("  no round trip from: "
+                     + ", ".join(f"{missed.count(o)} {o}" for o in sorted(set(missed))))
+    return lines
+
+
 def report_landing(model, tracker, track_t0, args, pressed_at, fit=None):
     """Read where the press landed and how long it took to get there.
 
@@ -161,7 +235,7 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None):
     """
 
     if args.dry_run or tracker.zone is None:
-        return
+        return Landing("not scored")
 
     deadline = pressed_at + FREEZE_WATCH_SECONDS
     readings = []
@@ -175,14 +249,14 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None):
     if len(readings) < 3:
         log(f"  landing: needle gone before it could be read ({len(readings)} reads in "
             f"{FREEZE_WATCH_SECONDS * 1000:.0f} ms)")
-        return
+        return Landing("needle gone")
 
     angles = [a for _, a in readings]
     settled = freeze_angle(angles)
     if settled is None:
         log(f"  landing: needle still sweeping {FREEZE_WATCH_SECONDS * 1000:.0f} ms after "
             f"the press — it did not connect, or this is Merciless Storm, which never stops")
-        return
+        return Landing("still sweeping")
 
     verdict, err = score_freeze(tracker.zone, settled)
     log(f"  landed {settled:.1f} deg — {verdict}"
@@ -191,7 +265,7 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None):
     press_ms = (pressed_at - track_t0) * 1000.0
     measured = time_to_angle(fit, settled, press_ms) if fit is not None else None
     if measured is None:
-        return
+        return Landing("no fit", verdict=verdict, error_deg=err)
 
     # The correction is signed and directly actionable: pass it as --round-trip-ms. Landing
     # early means we led by more than the loop actually costs, and early is the expensive
@@ -200,8 +274,15 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None):
     round_trip_ms = measured - press_ms
     onset = freeze_onset(readings)
     cross = f", tail read says {(onset - pressed_at) * 1000:.0f}" if onset is not None else ""
+
+    if not plausible_round_trip(round_trip_ms, fit):
+        log(f"  round trip {round_trip_ms:.0f} ms — IMPLAUSIBLE, past half a revolution; "
+            f"reading it as a wrap and excluding it{cross}")
+        return Landing("implausible", verdict=verdict, error_deg=err)
+
     log(f"  round trip {round_trip_ms:.0f} ms measured, against "
         f"{args.round_trip_ms:.0f} ms assumed{cross}")
+    return Landing("measured", round_trip_ms=round_trip_ms, verdict=verdict, error_deg=err)
 
 
 def run(args):
@@ -231,6 +312,7 @@ def run(args):
     active = False
     frames = 0
     hits = 0
+    landings = []          # one Landing per predictive fire; summarised at exit
     window_start = monotonic()
     seen_frontmost = None
 
@@ -351,7 +433,10 @@ def run(args):
                     log(f"  timing: frame age {frame_age_ms:.0f} ms at decide, lead "
                         f"{requested_ms:.0f} ms requested / "
                         f"{(pressed_at - track_t0) * 1000 - now_ms:.0f} ms slept")
-                    report_landing(model, tracker, track_t0, args, pressed_at, decision.fit)
+                    landing = report_landing(model, tracker, track_t0, args, pressed_at,
+                                             decision.fit)
+                    if landing is not None:
+                        landings.append(landing)
                     tracker = None
                     sleep(HIT_COOLDOWN_SECONDS)
                     window_start, last_capture = monotonic(), None
@@ -397,6 +482,10 @@ def run(args):
     finally:
         if not args.dry_run:
             ReleaseKey(SPACE)  # belt and braces: never exit with the key held
+        # The per-check lines scroll past during a match and the log is read afterwards, so
+        # the run has to state its own result rather than leaving it to be greped out.
+        for line in summarise_landings(landings):
+            log(line)
         model.cleanup()
 
 
