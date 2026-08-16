@@ -93,7 +93,7 @@ Read this twice: EAC can treat injected input as an unfair advantage, and accoun
 
 ## Tools
 
-Sixteen small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
+Seventeen small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
 
 | Tool | What it does |
 |---|---|
@@ -101,6 +101,7 @@ Sixteen small programs, all but the runner offline and replayable against record
 | `replay_tracker.py` | runs the tracker over recorded checks and scores where each press lands |
 | `test_needle_tracker.py` | unit tests for the tracker's logic, including the reversed-check path |
 | `test_landing_report.py` | tests the armed-only self-scoring path, which no dry-run reaches |
+| `test_continuous_check.py` | replays a 21 s Merciless Storm check unbroken; covers the buffer caps and the freeze loop |
 | `calibrate_window.py` | draws the capture box on a frame so you can see the framing |
 | `measure_latency.py` | keypress to pixel round trip |
 | `test_keypress.py` | isolates whether synthetic keys reach the host at all |

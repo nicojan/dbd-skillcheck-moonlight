@@ -88,6 +88,14 @@ Note the direction of the old error: it made the sweep look *more* variable and 
 
 Also corrected while doing this: **only 10 of the 14 hit recordings actually capture the freeze.** The other four end while the needle is still moving. "All were hit, so every one has a frozen tail" is true of the checks, not of the recordings.
 
+**2026-08-15 (evening, last): the Merciless Storm clip closed the two gaps the recordings could not.** `tools/test_continuous_check.py` replays `videos/merciless-storm.mp4` frames 25-658 as **one unbroken 21.1 s check** — which is what it is; `ingest_video.py` cuts it per revolution, so the ingested `check_NNN` directories cannot exercise this and the source video has to be re-decoded.
+
+- **The frame and sample caps now have evidence.** 633 frames in, 24 retained, **3.61 MB peak** against the 95 MB the uncapped version would have held, and `seen` still counts all 633 so the zone-retry cadence is unaffected.
+- **Abstention holds across the whole continuous check**, not merely per revolution. Zero presses scheduled in 21 s. The per-revolution replay could only ever show the former.
+- **The wall-clock loop in `report_landing` has now executed.** Nine grabs inside the 300 ms window at a 30 fps pacing, refusing a verdict on the never-stopping Merciless Storm needle and producing one (`landed 213.0 deg — GREAT, +4.5 deg`) on the genuinely frozen tail of `recordings/check_001`.
+
+**On stubbing, since this is the second time it mattered.** Repeating frames is honest only when the frames genuinely show a still needle. Cycling six frames of a frozen tail reproduces what the capture really sees; clamping on the last frame of a *sweep* invents a stillness that was never there, which is how the first version of this test passed its most important case for the wrong reason. The stub also has to be *paced*: `report_landing` samples against a wall clock, so an instant-return stub compresses its entire 300 ms window into microseconds and tests nothing about the loop.
+
 **Still open:** Merciless Storm's Great geometry (the tracker abstains rather than guessing), off-centre Doctor checks (still outside the 224 crop), and validation of the counter-clockwise path against real footage — every reversed check we have is Merciless Storm, which has no measurable Great band, so the direction handling is covered only by unit tests.
 
 **2026-08-15 (afternoon): third-party recordings closed the two gaps that five live sessions could not.** Downloaded clips of other players are now ingested by `tools/ingest_video.py` into the `recordings/` format, so every analysis tool runs on them unchanged. That gave the first real Doctor/Madness checks and the first Merciless Storm — see *What third-party recordings settled*. It also exposed **two silent bugs in `analyse_needle.py`**, both now fixed, both of which had been producing confident wrong answers about the project's load-bearing assumption:
