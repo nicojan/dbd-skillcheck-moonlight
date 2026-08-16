@@ -81,7 +81,13 @@ MIN_FIT_FRAMES = 5       # samples needed before a slope is worth acting on
 MAX_FIT_RMS_DEG = 8.0    # a fit worse than this is an instrument fault; do not fire on it
 MIN_RATE_DEG_S = 120.0   # below this it is not a sweeping check
 MAX_RATE_DEG_S = 800.0   # above the Coulrophobia + Hyperfocus ceiling of 609
-ROUND_TRIP_MS = 72.0     # keypress -> pixel, median of six trials spanning 8 ms
+# Keypress -> pixel. 60.0 is the first value measured ARMED, against the game, under load:
+# median 59 ms over six scored landings on 2026-08-15 23:20-23:25, which returned 5 GREAT,
+# 1 good, 0 MISS. Every earlier figure came from measure_latency.py, which presses at a
+# text field on the host with the detector not running — 72 originally, then 126.5 when
+# re-measured idle the same evening the armed run was landing at 59. Prefer the armed
+# number; `report_landing` prints one per check, so a session that disagrees says so.
+ROUND_TRIP_MS = 60.0
 GREAT_FALLBACK_DEG = 10.5  # measured; the simulator's default of 15 is 40% too wide
 
 # Aim this far PAST the middle of the Great band, in the needle's own direction. The two

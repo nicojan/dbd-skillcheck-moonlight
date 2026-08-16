@@ -8,7 +8,9 @@ It began as a measurement rig, because the reason repair and heal checks never l
 
 ## Status
 
-Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks**.
+Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks — verified armed, in a real match**: 5 Great, 1 good, 0 miss across six scored landings on 2026-08-15.
+
+Still losing about a quarter of presses, which never reach the game at all (`still sweeping`). That is the largest remaining loss and it is a delivery problem, not a timing one.
 
 Not handled: Merciless Storm, where the tracker deliberately abstains. Off-centre Doctor checks are still outside the capture crop.
 
