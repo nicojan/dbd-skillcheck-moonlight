@@ -185,28 +185,40 @@ def needle_angle(bgr, centre=CENTRE_PRIOR):
     return float(angles[int(np.argmax(profile))]), float(profile.max())
 
 
-def lit_span(samples, relative_floor=RELATIVE_FLOOR):
-    """(start, stop) of the contiguous block where a needle is actually drawn.
+def strength_reference(strengths):
+    """The check's own peak needle response, or None if there is nothing to measure.
 
-    A fixed strength floor is not enough, and neither is the classifier: it labels the
-    check-free frames either side of a real check `full black (out)` rather than `None`,
-    so they survive a class filter and reach the fit, where the brightest stray red pixel
-    supplies a meaningless angle that drifts the OPPOSITE way to the real sweep. That was
-    enough to reverse an inferred direction once, and here it dragged a whole-check rate
-    from 325 to 293 deg/s.
-
-    Judging strength against the check's own peak is what generalises: a drawn needle
-    scores 70-150, those strays reach 20-45.
+    The median of the top quartile rather than the maximum: one bright frame should not
+    set the bar for the whole check.
     """
 
-    strengths = np.array([s.strength for s in samples])
-    if not len(strengths):
-        return 0, 0
-    ref = float(np.median(strengths[strengths >= np.percentile(strengths, 75)]))
-    lit = strengths >= max(MIN_NEEDLE_STRENGTH, relative_floor * ref)
+    arr = np.asarray(list(strengths), dtype=np.float64)
+    if not len(arr):
+        return None
+    return float(np.median(arr[arr >= np.percentile(arr, 75)]))
+
+
+def lit_floor(reference, relative_floor=RELATIVE_FLOOR):
+    """The strength above which a reading is a drawn needle rather than a leftover.
+
+    A fixed floor is not enough, and neither is the classifier: it labels the check-free
+    frames either side of a real check `full black (out)` rather than `None`, so they
+    survive a class filter, and the brightest stray red pixel in them supplies a
+    meaningless angle. A drawn needle scores 70-150; those strays reach 20-45, which
+    clears the absolute floor of 20 outright. Judging against the check's own peak is
+    what separates them.
+    """
+
+    if reference is None:
+        return MIN_NEEDLE_STRENGTH
+    return max(MIN_NEEDLE_STRENGTH, relative_floor * reference)
+
+
+def _longest_true(mask):
+    """(start, stop) of the longest contiguous run of True. Never wraps."""
 
     best, run, start = (0, 0), 0, 0
-    for i, on in enumerate([*lit, False]):
+    for i, on in enumerate([*mask, False]):
         if on:
             start = i if run == 0 else start
             run += 1
@@ -214,6 +226,21 @@ def lit_span(samples, relative_floor=RELATIVE_FLOOR):
             best, run = max(best, (run, start)), 0
     length, start = best
     return start, start + length
+
+
+def lit_span(samples, relative_floor=RELATIVE_FLOOR):
+    """(start, stop) of the contiguous block where a needle is actually drawn.
+
+    Stray red outside a check drifts the OPPOSITE way to the real sweep, which was once
+    enough to reverse an inferred direction, and here it dragged a whole-check rate from
+    325 to 293 deg/s. See `lit_floor` for why the threshold is relative.
+    """
+
+    strengths = [s.strength for s in samples]
+    if not strengths:
+        return 0, 0
+    floor = lit_floor(strength_reference(strengths), relative_floor)
+    return _longest_true([s >= floor for s in strengths])
 
 
 def trim_frozen_tail(samples):
@@ -627,3 +654,74 @@ def score_freeze(zone, freeze_deg):
     else:
         verdict = "MISS"
     return verdict, (freeze_deg - zone.great_mid + 540.0) % 360.0 - 180.0
+
+
+# --- reading the freeze watch ---------------------------------------------------------
+
+@dataclass(frozen=True)
+class Reading:
+    """One grab taken while watching for the needle to stop. `t` is monotonic seconds."""
+
+    t: float
+    angle: float
+    strength: float
+
+
+@dataclass(frozen=True)
+class Watch:
+    """What the freeze watch saw, and how much of it was a drawn needle.
+
+    `outcome` is one of:
+
+      * `frozen`   — the needle stopped; `angle` is where and `onset` is when we first saw it.
+      * `sweeping` — a needle was drawn and never stopped. With a dark tail that means the
+        check ran out its sweep and vanished, i.e. the press never reached the game;
+        without one, the watch simply ended first, or this is Merciless Storm.
+      * `dark`     — nothing above the floor was ever drawn. The check was already gone.
+      * `no reads` — too few grabs to judge at all.
+
+    `dark_tail` is what makes the first two of those distinguishable, and distinguishing
+    them is the whole point: both used to print the same line.
+    """
+
+    outcome: str
+    angle: Optional[float] = None
+    onset: Optional[float] = None
+    lit: int = 0
+    reads: int = 0
+    dark_tail: int = 0
+    floor: float = MIN_NEEDLE_STRENGTH
+
+
+def read_watch(readings, reference=None, tolerance=FREEZE_TOLERANCE_DEG, window=3):
+    """Decide what a series of post-press grabs shows. Pure; the caller owns the clock.
+
+    Judge the CONTIGUOUS LIT BLOCK, not the tail of everything read. A press that connects
+    freezes the needle and the check then leaves the screen well inside the watch window,
+    so the last few grabs are stray red at 20-45 strength with meaningless, jittering
+    angles. Reading the tail of all of them therefore refused a verdict for a landing that
+    was perfect, and printed the same message a press that never arrived produces — six of
+    nine armed fires on 2026-08-15 came back that way, and were counted as lost presses.
+    """
+
+    readings = tuple(readings)
+    floor = lit_floor(reference)
+    if len(readings) < window:
+        return Watch("no reads", reads=len(readings), floor=floor)
+
+    lit = [r.strength >= floor for r in readings]
+    dark_tail = next((i for i, on in enumerate(reversed(lit)) if on), len(lit))
+    start, stop = _longest_true(lit)
+    block = readings[start:stop]
+    if len(block) < window:
+        return Watch("dark", lit=len(block), reads=len(readings), dark_tail=dark_tail,
+                     floor=floor)
+
+    settled = freeze_angle([r.angle for r in block], tolerance=tolerance, window=window)
+    if settled is None:
+        return Watch("sweeping", lit=len(block), reads=len(readings), dark_tail=dark_tail,
+                     floor=floor)
+
+    onset = freeze_onset([(r.t, r.angle) for r in block], tolerance=tolerance, window=window)
+    return Watch("frozen", angle=settled, onset=onset, lit=len(block),
+                 reads=len(readings), dark_tail=dark_tail, floor=floor)

@@ -24,6 +24,7 @@ are firing where you expect.
 """
 
 import argparse
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -37,8 +38,8 @@ from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.needle_tracker import (
-    MIN_NEEDLE_STRENGTH, ROUND_TRIP_MS, TrackerState, decide, freeze_angle, freeze_onset,
-    mark_fired, needle_angle, observe, score_freeze, time_to_angle,
+    ROUND_TRIP_MS, Reading, TrackerState, decide, mark_fired, needle_angle, observe,
+    read_watch, score_freeze, strength_reference, time_to_angle,
 )
 
 IDLE_POLL_SECONDS = 0.20
@@ -65,6 +66,23 @@ TRACK_DROP_FRAMES = 3     # consecutive check-free frames that end a track
 # printed. Keep this well clear of the worst round trip until that delay is understood.
 FREEZE_WATCH_SECONDS = 0.80
 
+# Trailing grabs below the needle floor that mean the check has left the screen. Once it
+# has, no further grab can add anything, and the watch used to spend the rest of its 800 ms
+# staring at an empty crop with the detector stopped — blind to a second check the whole
+# time. Four is two grabs past the three a freeze needs, so a single dark frame mid-check
+# cannot end the watch early.
+CLEARED_DARK_READS = 4
+
+# How much of a landing error is taken into the lead. The measured round trip is the only
+# latency figure this project has that was taken armed, but it is one sample from a link
+# whose spread is 46-98 ms, so following it fully would swing the aim by more than a Great
+# band on every check. A third of the error converges in a handful of checks and rides out
+# a single bad one; the clamps keep a wild reading (a wrapped revolution that slipped the
+# plausibility gate) from steering the run into never firing at all.
+LEAD_GAIN = 0.3
+LEAD_MIN_MS = 25.0
+LEAD_MAX_MS = 160.0
+
 # How long SPACE is held down. This is NOT cosmetic: the press was 5 ms, which a desktop
 # text field registers fine (key events are queued, so duration is irrelevant) but a game
 # polling input once per rendered frame can miss entirely — 16.7 ms between polls at 60 fps,
@@ -74,6 +92,15 @@ FREEZE_WATCH_SECONDS = 0.80
 # delivery, and is within the range of a normal human tap. Only key-DOWN decides when the
 # hit registers, so a longer hold costs nothing in timing accuracy.
 PRESS_HOLD_SECONDS = 0.05
+
+# The last stretch of the lead is spun rather than slept. sleep() overshot by 2-5 ms on
+# every armed fire — requested 9 slept 12, requested 31 slept 36 — a systematic late bias
+# of about a degree at 325 deg/s, quietly absorbed into the round-trip constant instead of
+# removed. Measured here, sleep returns about 50% late and deterministically so: 2 ms takes
+# 3.0, 5 takes 7.5, 14 takes 20.7, 34 takes 44.0, with the maximum over 30 trials within
+# 0.4 ms of the median. A single sleep of the whole gap therefore cannot be corrected by a
+# fixed margin — see _wait_until. The spin costs one core for a few ms, once per check.
+SPIN_MS = 3.0
 
 # A Space transition takes time to settle, and Moonlight registers ~16 windows while
 # it does. Resolving geometry mid-transition picked a menu-bar-inset window once
@@ -92,6 +119,12 @@ def parse_args():
                    help="disable predictive firing; react to the classifier as upstream does")
     p.add_argument("--round-trip-ms", type=float, default=ROUND_TRIP_MS,
                    help="measured keypress->pixel latency the prediction leads by")
+    p.add_argument("--no-adapt-lead", dest="adapt_lead", action="store_false",
+                   help="keep the lead fixed instead of following the measured round trip")
+    p.add_argument("--landing-log", default=None,
+                   help="JSONL of every freeze watch (default: landings-<timestamp>.jsonl)")
+    p.add_argument("--no-landing-log", dest="landing_log_enabled", action="store_false",
+                   help="do not record the freeze watch readings")
     p.add_argument("--dry-run", action="store_true", help="log detections without pressing keys")
     p.add_argument("--no-require-on-screen", action="store_true",
                    help="gate on focus alone, skipping the window-list confirmation")
@@ -113,10 +146,32 @@ def log(message):
     print(f"[{strftime('%H:%M:%S')}] {message}", flush=True)
 
 
+def _wait_until(deadline):
+    """Wait out a deadline accurately: halve the gap with sleep, then spin the last bit.
+
+    sleep() returns about 50% late here, so sleeping the whole remaining gap overshoots by
+    half of it and no fixed margin fixes that — the error scales with the wait. Sleeping
+    HALF the gap lands at ~75% of it even with a 50% overrun, so the loop converges on the
+    deadline from below in two or three passes and the spin covers what is left. A press
+    that goes out late by a few milliseconds is a press aimed a degree or two late.
+    """
+
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= SPIN_MS * 0.001:
+            break
+        sleep(remaining * 0.5)
+    while monotonic() < deadline:
+        pass
+
+
 def fire(args, wait_ms):
     """Sleep out the remaining lead, then tap SPACE. The sleep is the whole point.
 
-    Takes MILLISECONDS. It used to take seconds while the only caller that passed a
+    Takes MILLISECONDS. The last SPIN_MS of the wait is spun rather than slept, because
+    sleep() consistently returned late by 2-5 ms and that lands straight in the press.
+
+    It used to take seconds while the only caller that passed a
     non-zero value handed it `decision.press_at_ms - now_ms`, so every predictive press
     slept 1000x too long: a 20 ms lead became a 20 second one. The reactive path passes 0
     and was unaffected, which is why reactive pressed the game and predictive appeared
@@ -129,8 +184,7 @@ def fire(args, wait_ms):
     to timing — see PRESS_HOLD_SECONDS.
     """
 
-    if wait_ms > 0:
-        sleep(wait_ms * 0.001)
+    _wait_until(monotonic() + wait_ms * 0.001)
     pressed_at = monotonic()
     if args.dry_run:
         return pressed_at
@@ -165,6 +219,50 @@ def plausible_round_trip(round_trip_ms, fit):
     if fit is None or abs(fit.rate_deg_s) < 1e-6:
         return False
     return 0.0 <= round_trip_ms <= 180.0 / abs(fit.rate_deg_s) * 1000.0
+
+
+def adapt_lead(lead_ms, measured_ms, gain=LEAD_GAIN, lo=LEAD_MIN_MS, hi=LEAD_MAX_MS):
+    """Pull the lead a fraction of the way onto the round trip this check actually took.
+
+    The measured round trip is `lead - overshoot + landing_error/rate` — the same
+    measurement as the landing error, restated in milliseconds, and the only latency
+    figure this project has that was taken armed against the game. Following it fully
+    would put the whole of a 46-98 ms spread into the next aim; following a third of it
+    converges on the link's median in a handful of checks and shrugs off one bad one.
+
+    This removes the CONSTANT part of the error. It cannot touch the jitter, which at
+    +/-17 ms is +/-5.6 deg against a Great half-width of 5.25 and is the ceiling on this
+    whole approach.
+    """
+
+    return min(hi, max(lo, (1.0 - gain) * lead_ms + gain * measured_ms))
+
+
+class LandingLog:
+    """Append-only JSONL, one object per predictive fire, readings included.
+
+    The freeze watch used to collect thirty-odd grabs, print a single line and throw the
+    rest away. That is why a quarter of fires spent four sessions filed under "the press
+    never arrived" with no way to tell that from "the watch could not read the landing" —
+    the raw series distinguishes them instantly and nothing was keeping it.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.handle = None
+        self.written = 0
+
+    def write(self, record):
+        if self.handle is None:
+            self.handle = open(self.path, "a", encoding="utf-8")
+        self.handle.write(json.dumps(record) + "\n")
+        self.handle.flush()   # a match that ends in a crash must still leave its evidence
+        self.written += 1
+
+    def close(self):
+        if self.handle is not None:
+            self.handle.close()
+            self.handle = None
 
 
 def median(values):
@@ -212,7 +310,8 @@ def summarise_landings(landings):
     return lines
 
 
-def report_landing(model, tracker, track_t0, args, pressed_at, fit=None):
+def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
+                   lead_ms=None, record=None, context=None):
     """Read where the press landed and how long it took to get there.
 
     A successful hit stops the needle dead at the hit position, so the frozen angle is the
@@ -232,32 +331,76 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None):
 
     This is the only measurement of the round trip taken under real armed-run load;
     `measure_latency.py` takes it idle, in its own process, against a host text field.
+
+    Every grab is kept and handed to `record`, because the line this function prints is a
+    conclusion and the readings are the evidence for it. Four sessions were spent guessing
+    at a 25% loss that this loop had the data to explain and was discarding.
     """
 
     if args.dry_run or tracker.zone is None:
         return Landing("not scored")
 
+    # The floor is relative to THIS check's own needle. An absolute 20 admits the stray red
+    # left behind once the check clears, which scores 20-45 with a meaningless angle.
+    reference = strength_reference([s.strength for s in tracker.samples])
     deadline = pressed_at + FREEZE_WATCH_SECONDS
-    readings = []
+    readings, watch = [], read_watch(())
     while monotonic() < deadline:
         t = monotonic()
         bgr = model.grab_screenshot()[:, :, ::-1]
         angle, strength = needle_angle(bgr, tracker.centre)
-        if strength >= MIN_NEEDLE_STRENGTH:
-            readings.append((t, angle))
+        readings.append(Reading(t, angle, strength))
+        watch = read_watch(readings, reference)
+        if watch.outcome == "frozen":
+            break                       # three agreeing reads; nothing more to learn
+        if watch.lit >= 3 and watch.dark_tail >= CLEARED_DARK_READS:
+            break                       # the check has left the screen
 
-    if len(readings) < 3:
-        log(f"  landing: needle gone before it could be read ({len(readings)} reads in "
-            f"{FREEZE_WATCH_SECONDS * 1000:.0f} ms)")
-        return Landing("needle gone")
+    def finish(landing, **extra):
+        if record is not None:
+            entry = dict(context or {})
+            entry.update({
+                "outcome": watch.outcome,
+                "landing": landing.outcome,
+                "reads": watch.reads,
+                "lit": watch.lit,
+                "dark_tail": watch.dark_tail,
+                "lit_floor": round(watch.floor, 1),
+                "reference_strength": None if reference is None else round(reference, 1),
+                "lead_ms": lead_ms,
+                "watch_ms": round((monotonic() - pressed_at) * 1000.0, 1),
+                "rate_deg_s": None if fit is None else round(fit.rate_deg_s, 1),
+                "fit_rms_deg": None if fit is None else round(fit.rms_deg, 2),
+                "fit_n": None if fit is None else fit.n,
+                "zone": {"great_start": tracker.zone.great_start,
+                         "great_end": tracker.zone.great_end,
+                         "zone_start": tracker.zone.zone_start,
+                         "zone_end": tracker.zone.zone_end},
+                "readings": [[round((r.t - pressed_at) * 1000.0, 1), round(r.angle, 1),
+                              round(r.strength, 1)] for r in readings],
+            })
+            entry.update(extra)
+            record(entry)
+        return landing
 
-    angles = [a for _, a in readings]
-    settled = freeze_angle(angles)
-    if settled is None:
+    if watch.outcome in ("no reads", "dark"):
+        log(f"  landing: needle gone before it could be read ({watch.lit} lit of "
+            f"{watch.reads} reads, floor {watch.floor:.0f})")
+        return finish(Landing("needle gone"))
+
+    if watch.outcome == "sweeping":
+        if watch.dark_tail >= CLEARED_DARK_READS:
+            # The needle swept to the end of its arc and the check vanished unhit. A press
+            # that connects freezes it; a press that misses ends the check outright. Either
+            # way something would have stopped. Nothing did, so nothing arrived.
+            log(f"  landing: the check swept to its end and cleared — the press did not "
+                f"reach the game ({watch.lit} lit reads, then {watch.dark_tail} dark)")
+            return finish(Landing("check cleared"))
         log(f"  landing: needle still sweeping {FREEZE_WATCH_SECONDS * 1000:.0f} ms after "
             f"the press — it did not connect, or this is Merciless Storm, which never stops")
-        return Landing("still sweeping")
+        return finish(Landing("still sweeping"))
 
+    settled = watch.angle
     verdict, err = score_freeze(tracker.zone, settled)
     log(f"  landed {settled:.1f} deg — {verdict}"
         + (f", {err:+.1f} deg from Great centre" if err is not None else ""))
@@ -265,24 +408,46 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None):
     press_ms = (pressed_at - track_t0) * 1000.0
     measured = time_to_angle(fit, settled, press_ms) if fit is not None else None
     if measured is None:
-        return Landing("no fit", verdict=verdict, error_deg=err)
+        return finish(Landing("no fit", verdict=verdict, error_deg=err),
+                      settled_deg=round(settled, 1), verdict=verdict,
+                      error_deg=None if err is None else round(err, 2))
 
     # The correction is signed and directly actionable: pass it as --round-trip-ms. Landing
     # early means we led by more than the loop actually costs, and early is the expensive
     # error — Great sits at the leading edge of the success zone, so a late press spills
     # into Good while an early one misses outright.
     round_trip_ms = measured - press_ms
-    onset = freeze_onset(readings)
-    cross = f", tail read says {(onset - pressed_at) * 1000:.0f}" if onset is not None else ""
+    onset = watch.onset
+
+    # The tail read is quantised by the grab interval: the watch starts at key-down and
+    # grabs every ~25 ms, so the freeze can only be seen at the next multiple of that. Nine
+    # of ten armed checks reported 77-81 ms and one 103 — which is one bucket and its
+    # neighbour, not a link holding 79 +/- 2, and it is consistent with the 46-98 ms the
+    # fit gives. Quote the interval alongside the reading so the two are never again read
+    # as a disagreement.
+    if onset is not None:
+        gaps = [(b.t - a.t) * 1000.0 for a, b in zip(readings, readings[1:])]
+        interval = median(gaps) or 0.0
+        cross = (f", tail read says {(onset - pressed_at) * 1000:.0f} "
+                 f"+/-{interval:.0f} (grab interval)")
+    else:
+        cross = ""
+
+    scored = dict(settled_deg=round(settled, 1), verdict=verdict,
+                  error_deg=None if err is None else round(err, 2),
+                  round_trip_ms=round(round_trip_ms, 1),
+                  tail_read_ms=None if onset is None else round((onset - pressed_at) * 1000, 1))
 
     if not plausible_round_trip(round_trip_ms, fit):
         log(f"  round trip {round_trip_ms:.0f} ms — IMPLAUSIBLE, past half a revolution; "
             f"reading it as a wrap and excluding it{cross}")
-        return Landing("implausible", verdict=verdict, error_deg=err)
+        return finish(Landing("implausible", verdict=verdict, error_deg=err), **scored)
 
+    assumed = lead_ms if lead_ms is not None else getattr(args, "round_trip_ms", 0.0)
     log(f"  round trip {round_trip_ms:.0f} ms measured, against "
-        f"{args.round_trip_ms:.0f} ms assumed{cross}")
-    return Landing("measured", round_trip_ms=round_trip_ms, verdict=verdict, error_deg=err)
+        f"{assumed:.0f} ms assumed{cross}")
+    return finish(Landing("measured", round_trip_ms=round_trip_ms, verdict=verdict,
+                          error_deg=err), **scored)
 
 
 def run(args):
@@ -306,8 +471,17 @@ def run(args):
     )
     log(f"provider: {model.check_provider()}   dry_run: {args.dry_run}")
     log(f"firing: {'predictive' if args.predict else 'reactive only'}"
-        + (f", leading by {args.round_trip_ms:.0f} ms" if args.predict else ""))
+        + (f", leading by {args.round_trip_ms:.0f} ms"
+           f"{' (adaptive)' if args.adapt_lead else ' (fixed)'}" if args.predict else ""))
+
+    landing_log = None
+    if args.landing_log_enabled and not args.dry_run:
+        path = args.landing_log or f"landings-{strftime('%Y%m%d-%H%M%S')}.jsonl"
+        landing_log = LandingLog(path)
+        log(f"freeze watch readings -> {path}")
     log(f"waiting for '{args.window}' to become active (ctrl-c to quit)")
+
+    lead_ms = args.round_trip_ms
 
     active = False
     frames = 0
@@ -404,8 +578,7 @@ def run(args):
                 # grab_screenshot returns RGB; the needle test is R - max(G,B) on a BGR
                 # array, so an unconverted frame silently measures blueness instead.
                 tracker = observe(tracker, frame[:, :, ::-1], (captured - track_t0) * 1000.0)
-                decision = decide(tracker, (monotonic() - track_t0) * 1000.0,
-                                  args.round_trip_ms)
+                decision = decide(tracker, (monotonic() - track_t0) * 1000.0, lead_ms)
 
                 if decision.press_at_ms is not None:
                     now_ms = (monotonic() - track_t0) * 1000.0
@@ -433,10 +606,27 @@ def run(args):
                     log(f"  timing: frame age {frame_age_ms:.0f} ms at decide, lead "
                         f"{requested_ms:.0f} ms requested / "
                         f"{(pressed_at - track_t0) * 1000 - now_ms:.0f} ms slept")
-                    landing = report_landing(model, tracker, track_t0, args, pressed_at,
-                                             decision.fit)
+                    landing = report_landing(
+                        model, tracker, track_t0, args, pressed_at, decision.fit,
+                        lead_ms=lead_ms,
+                        record=None if landing_log is None else landing_log.write,
+                        context={"fire": len(landings) + 1, "at": strftime("%H:%M:%S"),
+                                 "desc": desc, "target_deg": decision.target_deg,
+                                 "lead_requested_ms": round(requested_ms, 1),
+                                 "lead_slept_ms": round(
+                                     (pressed_at - track_t0) * 1000 - now_ms, 1),
+                                 "frame_age_ms": round(frame_age_ms, 1)})
                     if landing is not None:
                         landings.append(landing)
+
+                    # Follow the link rather than a constant measured on one match. The
+                    # correction is applied AFTER the landing is recorded, so the log shows
+                    # what each check was actually aimed with.
+                    if args.adapt_lead and landing.round_trip_ms is not None:
+                        adapted = adapt_lead(lead_ms, landing.round_trip_ms)
+                        if abs(adapted - lead_ms) >= 1.0:
+                            log(f"  lead: {lead_ms:.0f} -> {adapted:.0f} ms")
+                        lead_ms = adapted
                     tracker = None
                     sleep(HIT_COOLDOWN_SECONDS)
                     window_start, last_capture = monotonic(), None
@@ -486,6 +676,11 @@ def run(args):
         # the run has to state its own result rather than leaving it to be greped out.
         for line in summarise_landings(landings):
             log(line)
+        if args.predict and args.adapt_lead:
+            log(f"  lead: started at {args.round_trip_ms:.0f} ms, ended at {lead_ms:.0f}")
+        if landing_log is not None:
+            log(f"  {landing_log.written} freeze watches recorded in {landing_log.path}")
+            landing_log.close()
         model.cleanup()
 
 

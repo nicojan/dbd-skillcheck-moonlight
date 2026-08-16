@@ -25,3 +25,8 @@ scan_hits/
 # third-party gameplay clips used as a dataset source
 videos/
 recordings_video/
+
+# per-run capture: armed console logs and the freeze-watch readings behind them
+armed-*.log
+reactive-*.log
+landings-*.jsonl

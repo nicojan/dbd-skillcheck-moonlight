@@ -21,7 +21,9 @@ cd /Users/nicojan/dev/dbd_autoSkillCheck
 
 Working: window targeting, focus gating, detection, key delivery through Moonlight, wiggle skill checks, and — as of 2026-08-15 23:20 — **predictive firing armed, in a real match**: 5 GREAT, 1 good, 0 MISS across six scored landings at `--round-trip-ms 60`. That is the claim no amount of replay could settle, and it is now settled.
 
-Two things remain open, in order of what they cost. **A quarter of presses never register** — 2 of 8 that session, 2 of 6 the session before, all reported as `still sweeping`, meaning the key did not reach the game at all. That is now the largest single loss, larger than any timing error. And **the two round-trip estimates disagree**: the fit-derived figure spread 46-91 ms while the tail read sat at 79 +/- 2 over the same six checks. The fit-derived one tracks the landing error at 3.1 ms/deg, which is exactly 1/rate — so it is the landing error restated, not an independent measurement. Which of the two is real decides whether the link jitters by 45 ms (near the ceiling, stop tuning) or by 4 (the scatter is ours, and there is headroom).
+**The two round-trip estimates never disagreed, and the link jitter is real** — settled on the bench 2026-08-16, see *The two latency estimates agree once the tail read is de-quantised*. True round trip is 46-98 ms, median 59, **sigma ~17 ms**, which is **5.6 deg** against a Great half-width of 5.25. That alone predicts ~66% Great, and the armed run returned 6 of 10. **The tracker is at its statistical ceiling and its own contribution is under 1 deg** — no amount of better fitting, frame rate or centre refinement can buy another Great. Only reducing link jitter can, which is Moonlight/host settings and the host-side input agent (next steps 1 and 8).
+
+**Whether a quarter of presses really never register is now in doubt** — the watch that reported it was reading stray red as needle. Fixed 2026-08-16; the next armed match answers it with recorded evidence rather than inference. See *The freeze watch was calling good landings lost presses*.
 
 Not working: Merciless Storm (deliberate abstention), off-centre Doctor checks (outside the capture crop).
 
@@ -31,7 +33,28 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 ## Resume here
 
-Read this section first; it is the state as of 2026-08-15.
+Read this section first; it is the state as of 2026-08-16.
+
+**2026-08-16: the error budget is now closed, and three of its four terms are removed.** No new play was needed for any of this — it came out of the nine armed logs, the code, and two bench measurements.
+
+| term | size | status |
+|------|------|--------|
+| link jitter | **17 ms / 5.6 deg** | irreducible from this side; the whole remaining problem |
+| fit + extrapolation | **< 1 deg** | already solved; do not spend more here |
+| `sleep()` overshoot | 2-5 ms / ~1 deg | **fixed** — `_wait_until` halves the gap then spins |
+| constant lead error | ~5 ms | **fixed** — the lead now follows the measured round trip |
+| freeze-watch misreads | up to 6 of 9 fires | **fixed** — the watch judges the lit block, not the tail of everything |
+
+The fit contributes under a degree because a 25-sample fit at 2 deg RMS pins the slope to ~0.002 deg/ms; extrapolating the 120 ms from the last frame to the landing costs about 0.25 deg, plus ~0.4 deg on the current angle. **Against 5.6 deg of link jitter that is nothing, and it retires a whole class of tempting work**: threading the capture, a Kalman filter, more frames per second, re-tuning `MIN_FIT_FRAMES`. None of them can move the result.
+
+What changed in the code:
+
+- **`report_landing` keeps every reading** and writes one JSON object per fire to `landings-<timestamp>.jsonl` — the raw `(ms since press, angle, strength)` series, the fit, the aim, the lead, the zone and the verdict. The loop used to collect thirty-odd grabs, print one line and discard the rest, which is why the biggest remaining loss went four sessions with no evidence under it.
+- **It judges the contiguous lit block** rather than the last three of everything, against a floor relative to the check's own peak. See the finding below.
+- **It stops as soon as the freeze is confirmed** — three agreeing reads, typically 75 ms — instead of always burning the full 800 ms with the detector stopped. Per fire that is 1.3 s of blindness down to ~0.6 s.
+- **It distinguishes `check cleared` from `still sweeping`.** A check that sweeps to its end and vanishes means the press never arrived; a needle still lit and moving when the window closes means Merciless Storm or too short a window. Both used to print the same line.
+- **The lead adapts.** `adapt_lead` takes 30% of each measured round trip, clamped to 25-160 ms. It removes the constant error and tracks drift; it cannot touch the jitter. `--no-adapt-lead` restores the fixed constant.
+- **The press no longer lands late.** See the `sleep()` finding below.
 
 **2026-08-15 (evening): the predictive tracker is built, validated offline and confirmed firing live.** `dbd/utils/needle_tracker.py` holds the logic, `tools/replay_tracker.py` scores it against every recorded check, `tools/test_needle_tracker.py` covers what the recordings cannot. `autorun.py` fires predictively by default; `--no-predict` restores upstream's reactive behaviour.
 
@@ -150,6 +173,7 @@ What exists to build against, all offline and replayable:
 | `dbd/utils/monitoring_window.py` | Targets the Moonlight window instead of a fixed display region; strips letterbox/pillarbox, scales the crop from *content* height |
 | `dbd/utils/focus_watcher.py` | Gates firing on the stream being focused |
 | `tools/autorun.py` | Main runner: focus-gated detect/fire loop, `--dry-run`, `--pin-geometry`, `--hit-ante` |
+| `tools/read_landings.py` | Reads a `landings-*.jsonl` back: verdict and jitter summary, and `--unscored` dumps the raw readings of any fire that produced no verdict, saying whether the needle was ever interrupted |
 | `tools/calibrate_window.py` | Dumps the capture box drawn on the frame, to verify framing |
 | `tools/test_keypress.py` | Isolates whether synthetic keys reach the host |
 | `tools/measure_latency.py` | Measures keypress → pixel round trip |
@@ -200,6 +224,16 @@ All on the 2560x1080 ultrawide, Moonlight fullscreen, stream pillarboxed to 1920
 Capture cost is dominated by the syscall, not the pixel count. Shrinking the capture region cannot buy frame rate; widening it is nearly free.
 
 ## Findings worth not rediscovering
+
+**The two latency estimates agree once the tail read is de-quantised (2026-08-16).** The handoff recorded them as contradictory: fit-derived 46-98 ms, tail read 79 +/- 2 over the same checks. **The tail read is quantised by the grab interval.** `report_landing` starts grabbing at key-down and grabs every ~25 ms — measured on the bench, `mss` on a 224 region is **24.4 ms** and `needle_angle` is **0.27 ms** — so the freeze can only be *seen* at the next multiple of that. Across all ten armed landings the tail read is 77, 77, 79, 79, 80, 80, 80, 80, 81 and one **103**: one bucket and its neighbour, not a link holding steady. Nine samples falling inside a 4 ms window out of 25 is about `3e-8` by chance, which is the tell. **It says only "somewhere in the bucket below 80", which is exactly consistent with 46-98.** The apparent precision was the instrument's, not the link's, and it argued for the wrong conclusion — that the scatter was ours and there was headroom in our own code.
+
+**The fit-derived round trip is the landing error restated, and that is fine — it is still the right estimator.** Expanding `time_to_angle` through the scheduling gives `round_trip = lead_assumed - sleep_overshoot + (landed - aimed)/rate`. Checked against the 23:24:11 armed fire: `60 - 4 + (-3.0/335)*1000 = 47` against the 46 reported. So it carries no information the landing error does not — but it is the correct closed-loop latency, and it is the only one this project has ever taken armed. **Do not describe it as an independent cross-check of the tail read; they are one measurement and a coarse bound on the same thing.**
+
+**Pooling all ten armed landings: median 59 ms, spread 46-98, sigma 17.** The two runs used different leads (90 and 60) but the estimator is lead-independent, so they pool. `tools/read_landings.py` over those ten reproduces it: *median 59 ms, sigma 17; landing error median +0.8 deg, bias +0.3, sigma 6.8 deg — 1.3x the Great half-width; 6 GREAT, 2 good, 2 MISS.* 17 ms is 5.6 deg at 325 deg/s against a Great half-width of 5.25, so **the jitter alone predicts about 66% Great and the run scored 60%.** There is no gap left to explain with our own code. The bias of +0.3 deg also says the 60 ms constant was already close to right — which is why the adaptive lead is worth a degree, not ten.
+
+**The freeze watch was calling good landings lost presses (2026-08-16).** `report_landing` gated its readings on `strength >= MIN_NEEDLE_STRENGTH`, an absolute 20 — while this file already records, three sections up, that the stray red left behind once a check clears **scores 20-45**. So after a press connected, the needle froze, the check left the screen inside the 800 ms window, and the remaining grabs were strays with jittering meaningless angles. `freeze_angle` was applied to the last three of *all* readings, those three disagreed, and a perfect GREAT was logged as `still sweeping` — the same line a press that never arrived produces. **Six of nine armed fires printed that line and were counted as lost presses.** The fix is the one `lit_span` already made for the sweep fit: a floor relative to the check's own peak, and judge the longest contiguous lit block rather than the tail of everything. Two lessons, both of which this project has now hit twice: **a measurement that can fail reports its own failure as a finding**, and **a fix applied to one reader of a signal has to be applied to every reader of it** — `lit_span` was hardened months before the watch loop was written, and the watch loop was written without it.
+
+**`sleep()` on this machine returns about 50% late, deterministically (2026-08-16).** Measured over 30 trials each: 2 ms takes 3.0, 5 takes 7.5, 14 takes 20.7, 34 takes 44.0, with the maximum within 0.4 ms of the median. That is the whole of the `requested 9 slept 12 / requested 31 slept 36` pattern in the armed logs — about a degree of late bias at 325 deg/s, and it was being absorbed into the round-trip constant instead of removed. **A fixed margin cannot correct it because the error scales with the wait.** `_wait_until` sleeps half the remaining gap and re-checks, which lands at ~75% of it even with a 50% overrun, then spins the last 3 ms. Overshoot is now under 0.1 ms. Anything else in this codebase that sleeps a deadline has the same bug.
 
 **A milliseconds value slept as seconds cost four armed matches (2026-08-15).** `fire()` took `wait_seconds` and slept it directly; the predictive call site passed `decision.press_at_ms - now_ms`, in milliseconds. Every predictive press therefore slept 1000x too long — the guard above the call only fires when the remaining lead is under ~1.25 frame periods, so leads were 0-32 ms and became 0-32 **seconds**. Nothing in the test estate could see it: `--dry-run` returns before the sleep, the offline replay never sleeps at all, and the reactive path passes 0 — which is why `--no-predict` pressed the game correctly the whole time and predictive appeared never to press. Armed, the symptom was `needle gone before it could be read`, which reads like a *detection* fault and sent four sessions of diagnosis at the capture layer, the press hold, and the latency constant. The single readable landing we ever got (112 deg late) was the check whose remaining lead happened to be 0.343 ms. **Three lessons, in order of how much time each would have saved:** a boundary that carries a unit must carry it in the parameter name, not the caller's memory; a code path no test can reach is a code path that is wrong; and when a failure message names a *layer* (`needle gone`), check that the layer is where the fault is before believing it.
 
@@ -461,6 +495,8 @@ The relationship worth keeping in mind: `hit window (ms) = Great band angular wi
    Still worth doing, and needs no new play: **a hit freezes the needle, and `trim_frozen_tail` already detects that freeze.** The freeze angle relative to the located ring is where the press landed, so the 14 hit recordings can be mined for *hit position* — which would answer "Great or Good?" per check directly, instead of inferring it from Great/Good counts at the end of a match. That machinery is needed by the tracker anyway. `measure_zone.py` now supplies the other half of that comparison: with the zone located in the same frame, a freeze angle can be scored against it directly.
 
 7. **Housekeeping.** Disk is at **95% (56 GB free)** and `session_20260812_193737` is the largest unpruned asset at 8.5 GB. Pruning it needs `scan_frames.py` to run first, since `prune_frames.py` reads the `hits/` that the tile sweep writes — ~20 minutes of compute, and there is no Doctor in that session to hunt, so it is purely a disk decision. Do **not** prune it against centre-crop detections.
+
+8. **Inject input on the host instead of through Moonlight.** The round trip is video-out + our processing + input-in, and the input leg goes mac -> Moonlight client -> network -> host -> game, with Moonlight batching input against its frame pacing. A small UDP listener on the Windows host calling `SendInput` cuts that leg to LAN RTT — 1-3 ms — which shortens the lead and, more importantly, **removes a jitter source that cannot be touched from this side**. `dbd/utils/directkeys_win.py` is already the host half; `directkeys.py` gains a third backend and the client half is a `sendto`. It is also the leading suspect for any press that genuinely does not register. **Gate this on the first landing log**: if the recorded watches show presses arriving reliably, the win is jitter only; if they show real drops, this is the fix for both. Same private-games caveat as everything else here.
 
 ## Open data
 

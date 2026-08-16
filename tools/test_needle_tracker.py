@@ -23,7 +23,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
 
 from dbd.utils.needle_tracker import (
-    AIM_BIAS_DEG, Fit, Sample, TrackerState, Zone, decide, fit_sweep, lit_span, score_freeze,
+    AIM_BIAS_DEG, Fit, MIN_NEEDLE_STRENGTH, Reading, Sample, TrackerState, Zone, decide,
+    fit_sweep, lit_floor, lit_span, read_watch, score_freeze, strength_reference,
     time_to_angle, trim_frozen_tail, _longest_run,
 )
 
@@ -185,6 +186,94 @@ def test_score_freeze():
     wrapped = Zone(great_start=355.0, great_end=5.0, zone_start=355.0, zone_end=45.0)
     check("a Great band across 0 deg still scores",
           score_freeze(wrapped, 2.0)[0] == "GREAT", score_freeze(wrapped, 2.0))
+
+
+def watch_readings(spec, dt_ms=25.0, t0=0.0):
+    """(angle, strength) pairs on a fixed cadence, as the freeze watch collects them."""
+
+    return tuple(Reading(t0 + i * dt_ms / 1000.0, a, s) for i, (a, s) in enumerate(spec))
+
+
+def test_the_strength_floor_is_relative_to_the_checks_own_peak():
+    # A drawn needle scores 70-150; the strays left behind once the check clears reach
+    # 20-45, which clears the absolute floor of 20. Judging against the check's own peak
+    # is what separates them, and it is why lit_span exists — the freeze watch was reading
+    # the strays as needle and taking their jittering angles as "still sweeping".
+    check("the reference is the check's own peak, not its mean",
+          abs(strength_reference([30.0, 100.0, 110.0, 120.0, 130.0]) - 125.0) < 1e-6,
+          strength_reference([30.0, 100.0, 110.0, 120.0, 130.0]))
+    check("no strengths, no reference", strength_reference([]) is None)
+
+    floor = lit_floor(120.0)
+    check("a stray at 40 falls below a 120-peak floor", floor > 45.0, floor)
+    check("a needle at 90 clears it", floor <= 90.0, floor)
+    check("without a reference the absolute floor still applies",
+          lit_floor(None) == MIN_NEEDLE_STRENGTH, lit_floor(None))
+    # A dim check must not raise its own floor above its own needle.
+    check("the floor never exceeds the absolute minimum for a dim check",
+          lit_floor(20.0) == MIN_NEEDLE_STRENGTH, lit_floor(20.0))
+
+
+def test_a_freeze_followed_by_the_check_clearing_still_reads_as_frozen():
+    # THE BUG THIS EXISTS FOR. freeze_angle was applied to the last three of ALL readings.
+    # A press that connects freezes the needle, and the check then leaves the screen well
+    # inside the 800 ms watch — so the last three readings are strays, they disagree, and
+    # a landing that was perfect reports "still sweeping": indistinguishable in the log
+    # from a press that never arrived. Six of nine armed fires printed that line.
+    frozen_then_gone = watch_readings(
+        [(100.0, 110.0), (107.0, 115.0), (114.0, 120.0),   # still sweeping
+         (118.0, 118.0), (118.5, 116.0), (118.0, 119.0),   # the freeze
+         (118.5, 117.0),
+         (12.0, 31.0), (300.0, 28.0), (77.0, 35.0)])       # check gone, strays only
+    watch = read_watch(frozen_then_gone, reference=118.0)
+    check("the freeze is found inside the lit block", watch.outcome == "frozen", watch)
+    check("and the settled angle is the needle, not a stray",
+          watch.angle is not None and abs(watch.angle - 118.5) < 1.0, watch)
+    check("the onset is the first frozen read",
+          watch.onset is not None and abs(watch.onset - 3 * 0.025) < 1e-6, watch)
+    check("the strays are excluded from the lit block", watch.lit == 7, watch)
+    check("and are counted as a dark tail", watch.dark_tail == 3, watch)
+
+
+def test_a_check_that_sweeps_to_the_end_and_vanishes_is_not_a_freeze():
+    # A press that never reached the game leaves the check to run out its sweep and
+    # disappear. That must NOT read as frozen, and it is worth distinguishing from a
+    # needle still sweeping at the end of the window — one says the press was lost, the
+    # other says the watch was too short or this is Merciless Storm.
+    swept_then_gone = watch_readings(
+        [(a, 110.0) for a in (100.0, 107.0, 114.0, 121.0, 128.0, 135.0)]
+        + [(11.0, 30.0), (250.0, 26.0), (140.0, 33.0), (9.0, 29.0)])
+    watch = read_watch(swept_then_gone, reference=110.0)
+    check("a sweep that ends in nothing is not frozen", watch.outcome == "sweeping", watch)
+    check("and the dark tail says the check cleared", watch.dark_tail == 4, watch)
+
+    still_going = watch_readings([(100.0 + 7 * i, 110.0) for i in range(12)])
+    watch = read_watch(still_going, reference=110.0)
+    check("a needle lit and moving throughout is still sweeping",
+          watch.outcome == "sweeping" and watch.dark_tail == 0, watch)
+
+
+def test_a_watch_that_saw_nothing_says_so():
+    check("no readings at all", read_watch((), reference=110.0).outcome == "no reads")
+    check("too few to judge",
+          read_watch(watch_readings([(1.0, 110.0), (8.0, 110.0)]),
+                     reference=110.0).outcome == "no reads")
+
+    strays_only = watch_readings([(11.0, 30.0), (250.0, 26.0), (140.0, 33.0), (9.0, 29.0)])
+    watch = read_watch(strays_only, reference=110.0)
+    check("strays alone are darkness, not a sweep", watch.outcome == "dark", watch)
+    check("and none of them counted as lit", watch.lit == 0, watch)
+
+
+def test_the_lit_block_is_the_longest_run_not_the_first():
+    # A dropped frame mid-freeze must not truncate the block and hide the freeze behind
+    # a two-read fragment.
+    gappy = watch_readings(
+        [(100.0, 110.0), (12.0, 20.0),                     # one dropped read
+         (114.0, 115.0), (118.0, 118.0), (118.5, 116.0), (118.0, 119.0)])
+    watch = read_watch(gappy, reference=118.0)
+    check("the longest lit run is the one judged", watch.outcome == "frozen", watch)
+    check("and the dropped read is not in it", watch.lit == 4, watch)
 
 
 def main():
