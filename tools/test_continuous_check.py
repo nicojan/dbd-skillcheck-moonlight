@@ -156,7 +156,9 @@ def test_the_freeze_loop_refuses_a_needle_that_never_stops():
 
     monitor = PacedMonitor(frames[100:140])
     state = TrackerState(centre=(cx, cy), zone=zone)
-    autorun.report_landing(monitor, state, 0.0, SimpleNamespace(dry_run=False))
+    autorun.report_landing(monitor, state, 0.0,
+                           SimpleNamespace(dry_run=False, round_trip_ms=130.0),
+                           time.monotonic())
 
     check("the loop sampled several frames in its window", monitor.grabs >= 5,
           f"only {monitor.grabs} grabs")
@@ -180,9 +182,15 @@ def test_the_freeze_loop_reports_a_real_freeze():
     # Cycling six frames of a genuinely frozen needle reproduces what the capture sees.
     monitor = PacedMonitor(images[-6:])
     state = TrackerState(centre=(cx, cy), zone=zone)
-    autorun.report_landing(monitor, state, 0.0, SimpleNamespace(dry_run=False))
+    autorun.report_landing(monitor, state, 0.0,
+                           SimpleNamespace(dry_run=False, round_trip_ms=130.0),
+                           time.monotonic())
 
     check("a real freeze produces a verdict", any("landed" in l for l in lines), lines)
+    # A stub cycling pre-frozen frames is frozen from the first grab, so the onset is at
+    # the press. The value is meaningless here; that a number is produced at all is not.
+    check("and a measured round trip alongside it",
+          any("round trip" in l for l in lines), lines)
     print(f"        {monitor.grabs} grabs — {lines[-1].strip() if lines else '(silent)'}")
 
 

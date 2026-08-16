@@ -572,6 +572,37 @@ def freeze_angle(angles, tolerance=FREEZE_TOLERANCE_DEG, window=3):
     return tail[-1] if spread <= tolerance else None
 
 
+def freeze_onset(readings, tolerance=FREEZE_TOLERANCE_DEG, window=3):
+    """When the freeze first became visible, from (timestamp, angle) reads. None if sweeping.
+
+    `freeze_angle` answers *where* the needle stopped; this answers *when* we could see it
+    stop. The gap between the press going out and that moment is the closed-loop round
+    trip, measured through the real pipeline, under real armed-run load, once per check.
+    `measure_latency.py` reports the same quantity but idle, in its own process, against a
+    text field on the host desktop — so it has never been able to see load or the game.
+
+    Walks BACKWARDS from the settled angle. Walking forward would stop at the first read
+    matching that angle, and a sweeping needle passes through its eventual resting place
+    on an earlier revolution — timing the fly-past instead of the freeze, and reporting a
+    round trip shorter than the truth. Short is the flattering direction, which is exactly
+    how this project's previous measurement errors survived.
+
+    Resolution is the grab interval, and the freeze can only be seen on the next grab
+    after it happens, so the result is late by up to one interval.
+    """
+
+    settled = freeze_angle([a for _, a in readings], tolerance=tolerance, window=window)
+    if settled is None:
+        return None
+
+    onset = None
+    for t, angle in reversed(readings):
+        if abs((angle - settled + 540.0) % 360.0 - 180.0) > tolerance:
+            break
+        onset = t
+    return onset
+
+
 def score_freeze(zone, freeze_deg):
     """Grade a press from where the needle stopped: 'GREAT', 'good' or 'MISS'.
 

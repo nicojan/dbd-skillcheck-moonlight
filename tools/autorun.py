@@ -35,8 +35,8 @@ from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.needle_tracker import (
-    MIN_NEEDLE_STRENGTH, ROUND_TRIP_MS, TrackerState, decide, freeze_angle, mark_fired,
-    needle_angle, observe, score_freeze,
+    MIN_NEEDLE_STRENGTH, ROUND_TRIP_MS, TrackerState, decide, freeze_angle, freeze_onset,
+    mark_fired, needle_angle, observe, score_freeze,
 )
 
 IDLE_POLL_SECONDS = 0.20
@@ -53,7 +53,15 @@ WIGGLE_PREDS = (8, 9, 10)
 DEFAULT_FRAME_MS = 30.0   # seed for the frame-period estimate, before any is measured
 FRAME_MS_DECAY = 0.8      # EMA weight on the previous estimate
 TRACK_DROP_FRAMES = 3     # consecutive check-free frames that end a track
-FREEZE_WATCH_SECONDS = 0.30   # how long to watch for the needle to freeze after a press
+# How long to watch for the needle to freeze after a press. This is a measurement window,
+# so it has to be wider than the delay it is measuring: the freeze cannot appear in our
+# capture until a full round trip after key-down, and a window shorter than that reports
+# `needle gone before it could be read` for a press that landed perfectly well. 0.30 was
+# sized when the loop was believed to be 72 ms. The armed run of 2026-08-15 landed 112 deg
+# late (~343 ms of unexplained delay on top of the 130 it led by), which would fall outside
+# a 300 ms window entirely — and `needle gone` is exactly what the earlier armed attempts
+# printed. Keep this well clear of the worst round trip until that delay is understood.
+FREEZE_WATCH_SECONDS = 0.80
 
 # How long SPACE is held down. This is NOT cosmetic: the press was 5 ms, which a desktop
 # text field registers fine (key events are queued, so duration is irrelevant) but a game
@@ -109,54 +117,77 @@ def fire(args, wait_ms):
     Takes MILLISECONDS. It used to take seconds while the only caller that passed a
     non-zero value handed it `decision.press_at_ms - now_ms`, so every predictive press
     slept 1000x too long: a 20 ms lead became a 20 second one. The reactive path passes 0
-    and was unaffected, which is why reactive pressed the game correctly the whole time
-    and predictive appeared never to press at all. The unit now lives in the parameter
-    name, and every value on both sides of this boundary is suffixed `_ms`.
+    and was unaffected, which is why reactive pressed the game and predictive appeared
+    never to press at all. The unit now lives in the parameter name, and every value on
+    both sides of this boundary is suffixed `_ms`.
+
+    Returns the monotonic timestamp of key-DOWN. That instant, not the return of this
+    function, is when the press is committed and when the round trip starts, so it is what
+    `report_landing` measures the freeze against. The release is 50 ms later and irrelevant
+    to timing — see PRESS_HOLD_SECONDS.
     """
 
     if wait_ms > 0:
         sleep(wait_ms * 0.001)
+    pressed_at = monotonic()
     if args.dry_run:
-        return
+        return pressed_at
     PressKey(SPACE)
     sleep(PRESS_HOLD_SECONDS)
     ReleaseKey(SPACE)
+    return pressed_at
 
 
-def report_landing(model, tracker, track_t0, args):
-    """Read where the press actually landed, from the angle the needle freezes at.
+def report_landing(model, tracker, track_t0, args, pressed_at):
+    """Read where the press landed and how long it took to get there.
 
     A successful hit stops the needle dead at the hit position, so the frozen angle is the
     landing — measured in the same frames, about the same centre, against the same drawn
     zone the press was aimed at. Without this the bot's accuracy could only be inferred
     from a Great/Good tally at the end of a match, which is how a 3x measurement error
     went unnoticed here before.
+
+    The same frames also date the freeze, and press -> freeze-visible IS the closed-loop
+    round trip. Reporting it per check is the only measurement of that number taken under
+    real armed-run load; `measure_latency.py` takes it idle, in its own process, against a
+    host text field. When the two disagree, this one is the one that describes the run.
     """
 
     if args.dry_run or tracker.zone is None:
         return
 
-    deadline = monotonic() + FREEZE_WATCH_SECONDS
-    angles = []
+    deadline = pressed_at + FREEZE_WATCH_SECONDS
+    readings = []
     while monotonic() < deadline:
+        t = monotonic()
         bgr = model.grab_screenshot()[:, :, ::-1]
         angle, strength = needle_angle(bgr, tracker.centre)
         if strength >= MIN_NEEDLE_STRENGTH:
-            angles.append(angle)
+            readings.append((t, angle))
 
-    if len(angles) < 3:
-        log("  landing: needle gone before it could be read")
+    if len(readings) < 3:
+        log(f"  landing: needle gone before it could be read ({len(readings)} reads in "
+            f"{FREEZE_WATCH_SECONDS * 1000:.0f} ms)")
         return
 
+    angles = [a for _, a in readings]
     settled = freeze_angle(angles)
     if settled is None:
-        log("  landing: needle still sweeping after the press — it did not connect, "
-            "or this is Merciless Storm, which never stops")
+        log(f"  landing: needle still sweeping {FREEZE_WATCH_SECONDS * 1000:.0f} ms after "
+            f"the press — it did not connect, or this is Merciless Storm, which never stops")
         return
 
     verdict, err = score_freeze(tracker.zone, settled)
+    onset = freeze_onset(readings)
+    # The grab interval bounds the resolution: the freeze is only visible on the next grab
+    # after it happens, so the figure is late by up to one interval and is reported with it.
+    grab_ms = (readings[-1][0] - readings[0][0]) * 1000.0 / max(1, len(readings) - 1)
+
     log(f"  landed {settled:.1f} deg — {verdict}"
         + (f", {err:+.1f} deg from Great centre" if err is not None else ""))
+    if onset is not None:
+        log(f"  round trip {(onset - pressed_at) * 1000:.0f} ms measured (+/-{grab_ms:.0f} "
+            f"grab), against {args.round_trip_ms:.0f} ms assumed")
 
 
 def run(args):
@@ -291,12 +322,22 @@ def run(args):
 
                     hits += 1
                     tracker = mark_fired(tracker, now_ms)
-                    fire(args, decision.press_at_ms - now_ms)
+                    # Age of the freshest frame the fit was built on. This is OUR share of
+                    # the delay — capture plus inference — and it is the half we can fix in
+                    # this file. Whatever the measured round trip exceeds it by belongs to
+                    # the stream, and no constant in here will move it.
+                    frame_age_ms = now_ms - tracker.samples[-1].t_ms if tracker.samples else 0.0
+                    requested_ms = decision.press_at_ms - now_ms
+                    pressed_at = fire(args, requested_ms)
+
                     fit = decision.fit
                     log(f"{'WOULD FIRE' if args.dry_run else 'FIRE'} predictive: {desc} — "
                         f"{fit.rate_deg_s:+.0f} deg/s, fit {fit.rms_deg:.1f} deg RMS over "
                         f"{fit.n} frames, aiming {decision.target_deg:.1f} deg")
-                    report_landing(model, tracker, track_t0, args)
+                    log(f"  timing: frame age {frame_age_ms:.0f} ms at decide, lead "
+                        f"{requested_ms:.0f} ms requested / "
+                        f"{(pressed_at - track_t0) * 1000 - now_ms:.0f} ms slept")
+                    report_landing(model, tracker, track_t0, args, pressed_at)
                     tracker = None
                     sleep(HIT_COOLDOWN_SECONDS)
                     window_start, last_capture = monotonic(), None

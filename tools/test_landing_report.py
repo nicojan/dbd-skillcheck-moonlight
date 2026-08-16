@@ -35,8 +35,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dbd.utils.needle_tracker import (
-    TrackerState, find_zone, freeze_angle, needle_angle, refine_centre, score_freeze,
-    static_image,
+    TrackerState, find_zone, freeze_angle, freeze_onset, needle_angle, refine_centre,
+    score_freeze, static_image,
 )
 from replay_tracker import load_check
 
@@ -132,6 +132,53 @@ def test_the_boundary_is_the_wobble_not_zero():
           freeze_angle(wrapped))
 
 
+def test_freeze_onset_times_the_moment_the_needle_stopped():
+    # The gap between the press going out and the freeze APPEARING in our capture is the
+    # round trip, measured through the real pipeline under real load. It is the number the
+    # armed run has never had: measure_latency.py reports it idle, in a separate process,
+    # against a text field on the host desktop rather than the game.
+    sweeping = [(0.000, 100.0), (0.025, 108.0), (0.050, 116.0), (0.075, 124.0)]
+    check("a needle that never stops has no onset", freeze_onset(sweeping) is None)
+
+    stopped = sweeping + [(0.100, 130.0), (0.125, 130.5), (0.150, 130.0), (0.175, 130.5)]
+    check("the onset is the first read of the frozen tail",
+          freeze_onset(stopped) == 0.100, freeze_onset(stopped))
+
+    # The needle sweeps THROUGH the angle it later freezes at. Walking forward for the
+    # first matching read would time the fly-past, not the freeze, and report a round trip
+    # far shorter than the truth — the flattering direction, and the one that would have
+    # let this ship unnoticed.
+    revisits = [(0.000, 130.0), (0.025, 200.0), (0.050, 280.0),
+                (0.075, 130.0), (0.100, 130.5), (0.125, 130.0)]
+    check("an earlier fly-past is not mistaken for the freeze",
+          freeze_onset(revisits) == 0.075, freeze_onset(revisits))
+
+    wrapped = [(0.000, 300.0), (0.025, 359.0), (0.050, 0.5), (0.075, 359.5)]
+    check("a freeze across 0 deg is timed correctly", freeze_onset(wrapped) == 0.025,
+          freeze_onset(wrapped))
+
+    check("too few reads yield no onset", freeze_onset([(0.0, 1.0), (0.025, 1.0)]) is None)
+
+
+def test_freeze_onset_agrees_with_freeze_angle():
+    # The two must never disagree: a settled angle with no onset (or the reverse) would
+    # print a round trip for a landing that was refused, or refuse one we had timed.
+    records, images = load_check("recordings/check_001")
+    centre, _ = zone_and_centre(images)
+    angles = [needle_angle(img, centre)[0] for img in images[-6:]]
+    readings = [(i * 0.025, a) for i, a in enumerate(angles)]
+
+    check("a real frozen tail has both", (freeze_angle(angles) is None)
+          == (freeze_onset(readings) is None))
+
+    records, images = load_check("recordings_missed/check_003")
+    centre, _ = zone_and_centre(images)
+    angles = [needle_angle(img, centre)[0] for img in images[:-12]]
+    readings = [(i * 0.025, a) for i, a in enumerate(angles)]
+    check("a real live sweep has neither", freeze_angle(angles) is None
+          and freeze_onset(readings) is None)
+
+
 def test_fire_waits_in_milliseconds():
     # The bug that cost four armed matches: fire() slept `press_at_ms - now_ms` as if it
     # were seconds, so a 20 ms lead became 20 seconds. Nothing caught it because --dry-run
@@ -148,8 +195,9 @@ def test_fire_waits_in_milliseconds():
           f"slept {elapsed_ms:.0f} ms")
 
     t0 = monotonic()
-    autorun.fire(dry, -5.0)
+    pressed_at = autorun.fire(dry, -5.0)
     check("a lead already past does not sleep", (monotonic() - t0) * 1000.0 < 20.0)
+    check("fire reports key-down time", t0 <= pressed_at <= monotonic())
 
 
 def test_stays_silent_in_dry_run_and_without_a_zone():
@@ -159,11 +207,11 @@ def test_stays_silent_in_dry_run_and_without_a_zone():
     monitor = StubMonitor(images[-8:])
 
     autorun.report_landing(monitor, TrackerState(centre=centre, zone=zone), 0.0,
-                           SimpleNamespace(dry_run=True))
+                           SimpleNamespace(dry_run=True), monotonic())
     check("dry run reports nothing", not lines, lines)
 
     autorun.report_landing(monitor, TrackerState(centre=centre, zone=None), 0.0,
-                           SimpleNamespace(dry_run=False))
+                           SimpleNamespace(dry_run=False), monotonic())
     check("no zone means no verdict", not lines, lines)
 
 

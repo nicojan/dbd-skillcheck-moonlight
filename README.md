@@ -117,14 +117,25 @@ FIRE predictive: repair-heal (out) — +327 deg/s, fit 2.5 deg RMS over 32 frame
 
 The class on the first line is normally `(out)`, not `(great)`. That is the design working: it commits about 72 ms before the needle reaches the band, while the model still calls it out.
 
-**What to compare.** The bot's verdict against the game's own feedback, check by check. The offline replay says 29/29 Great; anything much below that armed means the latency figure is wrong, and the *direction* says which way — `good` verdicts with a positive error mean it is arriving late, so the true round trip is longer than the number it was given.
+**What to compare.** The bot's verdict against the game's own feedback, check by check. The offline replay says 29/29 Great; a shortfall made up of `good` verdicts means the latency figure is wrong, and the *direction* says which way — a positive error means it is arriving late, so the true round trip is longer than the number it was given. A shortfall made up of *misses*, or of checks with no readable landing at all, is a different failure and is not about latency: see "When nothing lands at all" below.
 
 **When to stop and re-measure rather than push on:**
 
-- `landing: needle still sweeping after the press` on repair or heal checks. The press is not connecting at all — check the Accessibility grant for the terminal you launched from, since keys go nowhere silently without it.
+- `landing: needle still sweeping after the press`, or `landing: needle gone before it could be read`. Neither message distinguishes "pressed and missed" from "never pressed", so do not read either as a timing problem. See "When nothing lands at all" below.
 - `HIT reactive: … tracker stood down` appearing often. The tracker is not finding a zone; the framing is likely wrong.
 - `WARNING geometry changed`. Restart with `--pin-geometry`.
 - Verdicts that disagree with the game. Stop and re-run `measure_latency.py` before collecting more.
+
+**When nothing lands at all.** If no check ever produces a readable `landed NNN deg` line, the press is not reaching the game *when it was aimed to*, and no amount of `--round-trip-ms` tuning will help. A latency error cannot produce outright misses anyway: replay at believed 130 ms gives Good, not misses, until true latency reaches ~250 ms, and all-misses needs ~300 ms. Work down this ladder instead:
+
+1. **Read the `timing:` line.** Every predictive fire now logs the age of the frame the fit was built on, the lead it asked for, and the lead it actually slept. If requested and slept disagree, the fault is in this process and nothing further down the ladder matters. This is what caught the unit bug below.
+2. **Read the `round trip NNN ms measured` line.** `report_landing` times how long the freeze took to appear in our own capture, which is the closed-loop latency under real armed-run load. `measure_latency.py` measures the same quantity idle, in its own process, against a host text field — when the two disagree, the armed number is the one describing the run. If the measured round trip is far above what was assumed, re-measure; if it swings check to check, the fault is the stream and no constant will fix it.
+3. **Run it from a plain terminal window.** Not through Claude Code — its Bash tool is sandboxed, so CGEvent injection is silently dropped, and its `!` prompt is killed at 120 s, mid-match.
+4. **Check the press hold.** `PRESS_HOLD_SECONDS` must stay well above one host frame period. It was 5 ms until 2026-08-15, which a desktop text field registers fine — key events are queued, so duration is irrelevant — while a game polling input once per rendered frame (16.7 ms at 60 fps) can miss it entirely, especially as Moonlight batches the press and release over the network. **No dry run can catch this**, because `fire()` returns before pressing when `--dry-run` is set.
+5. **Isolate delivery** with `test_keypress.py --presses 5`, with the host on something a spacebar visibly changes. It holds SPACE for 50 ms, so it can pass where a shorter hold fails.
+6. **Compare against reactive.** `autorun.py --no-predict` presses with no lead and should land in Good. If reactive scores and predictive does not, the problem is in the predictive path alone — as it turned out to be.
+
+**The bug this ladder was built to find, for the record.** `fire()` took its wait in *seconds* while the predictive call site passed `decision.press_at_ms - now_ms` in *milliseconds*. Every predictive press therefore slept 1000x too long — a 20 ms lead became 20 seconds. It survived four armed matches because nothing else could see it: `--dry-run` returns before the sleep, the offline replay never sleeps, the reactive path passes 0, and the symptom it produced armed was `needle gone before it could be read`, which reads like a *detection* fault. The one check that ever produced a landing was the one whose remaining lead happened to be a fraction of a millisecond. `fire()` now takes milliseconds, says so in the parameter name, and `test_landing_report.py` pins the unit.
 
 Read this twice: EAC can treat injected input as an unfair advantage, and accounts get banned for it. Upstream restricts the tool to private games. This fork does nothing to improve those odds.
 
