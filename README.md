@@ -4,19 +4,34 @@ A macOS fork of [Manuteaa/dbd_autoSkillCheck](https://github.com/Manuteaa/dbd_au
 
 Upstream is Windows-only, and it assumes the game and the watcher share a computer. Both assumptions break here. Almost everything in this fork follows from that.
 
-This is closer to a measurement rig than a finished bot. It reliably hits wiggle checks and reliably misses Great on repair and heal, for a reason that turns out to be arithmetic.
+It began as a measurement rig, because the reason repair and heal checks never landed Great turned out to be arithmetic rather than tuning. It now fires predictively, which is the only thing that can work.
 
 ## Status
 
-Working: window targeting, focus gating, detection, key delivery through the stream, wiggle skill checks.
+Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks**.
 
-Broken: repair and heal checks land in **Good**, never **Great**.
+Not handled: Merciless Storm, where the tracker deliberately abstains. Off-centre Doctor checks are still outside the capture crop.
 
-We measured the Great zone off the drawn pixels of 13 deliberately missed checks. It is **10.5 degrees wide**. At our median sweep rate of 320 deg/s the needle crosses that band in 33 ms, and across every rate we have recorded, up to the 406 deg/s ceiling Hyperfocus can reach, the window runs 26 to 37 ms. Our keypress-to-pixel round trip is **72 ms**, median of six trials that spanned 8 ms.
+We measured the Great zone off the drawn pixels of 13 deliberately missed checks. It is **10.5 degrees wide**, and the same measurement on the 13 hit checks agrees to within half a degree. At our median sweep rate of 320 deg/s the needle crosses that band in 33 ms, and across every rate we have recorded, up to the 406 deg/s ceiling Hyperfocus can reach, the window runs 26 to 37 ms. Our keypress-to-pixel round trip is **72 ms**, median of six trials that spanned 8 ms.
 
 The needle has therefore left the zone before the key arrives. No setting recovers those milliseconds. Upstream ships a delay dial (the hit-ante option). Raising it made results worse, which is how we learned that the Great band hugs the *leading* edge of the success zone. The dial was already at the end of its travel.
 
-Pressing early against a predicted position is the only thing left that can work. That tracker is the next piece of work. Everything it rests on has been checked against more than a hundred recorded checks, and the notes below say where those recordings live.
+So the bot no longer presses when it sees a Great. It locates the ring, reads the Great band out of the drawn pixels, fits the sweep as a straight line, and schedules the key so the needle *arrives* in the band 72 ms later. `dbd/utils/needle_tracker.py` is the whole of it.
+
+### What it scores
+
+`tools/replay_tracker.py` runs the live tracker frame by frame over every recorded check on disk and scores the press against ground truth measured from the whole check — the needle's fitted position when the key lands, versus the Great band read off the pixels. Nothing in the replay can see the future.
+
+| set | checks | result | worst error |
+|---|---|---|---|
+| `recordings_missed` (unhit) | 15 | 15 Great | 2.4 deg |
+| `recordings` (hit) | 13 | 13 Great | 3.3 deg |
+| `oppression.mp4` (native 4K, 363 deg/s) | 1 | 1 Great | 1.9 deg |
+| Merciless Storm, two clips | 29 | abstains on all 29 | — |
+
+The Great band is ±5.25 deg about its centre, so that is the error budget. Drop two frames in three and it still scores 15 and 12; the approach is not short of frames.
+
+What it *is* sensitive to is the 72 ms constant. Mis-state it by 10 ms and Greats fall to 11 of 15; by 20 ms and they fall to 2. Re-run `tools/measure_latency.py` after any change to the network path, the host, or Moonlight's settings, and pass the result as `--round-trip-ms`. The two directions are not symmetric — Great sits at the leading edge of the success zone, so firing late spills into Good while firing early misses the zone entirely — so the aim sits one degree late by design.
 
 ## What differs from upstream
 
@@ -26,7 +41,7 @@ Pressing early against a predicted position is the only thing left that can work
 | Windows path | the only path | kept intact in `directkeys_win.py` |
 | Capture | fixed display region | the Moonlight window, letterbox stripped |
 | Crop | fixed pixels | scaled from *content* height |
-| Firing | on any Great classification | gated on the stream holding focus |
+| Firing | on any Great classification | predicted, scheduled to land in Great; gated on focus |
 | Purpose | play the game | measure it, then play it |
 
 The trained model, its eleven-class taxonomy, and the whole training pipeline under `dbd/` are upstream's work, untouched. Three upstream Python files carry edits. The other 3,600 lines are new.
@@ -55,9 +70,12 @@ Start Moonlight and make it fullscreen. Then:
 
 ```bash
 .venv/bin/python tools/autorun.py --dry-run        # detect and log, press nothing
-.venv/bin/python tools/autorun.py                  # armed
+.venv/bin/python tools/autorun.py                  # armed, predictive
 .venv/bin/python tools/autorun.py --pin-geometry   # freeze the box after the first lock
+.venv/bin/python tools/autorun.py --no-predict     # upstream's reactive behaviour
 ```
+
+Every predictive shot logs the fitted rate, the fit residual, the frame count behind it, and the angle it aimed at. It then reads where the needle froze and grades itself Great, good or miss on the spot, so accuracy is a measurement rather than an inference from the end-of-match tally.
 
 Pin the geometry if the window has ever moved mid-session. Moonlight registers about sixteen windows, one of them a 1280x628 decoy that clears the size floor, and a refresh firing mid Space-transition once latched a menu-bar-inset window that gave a 218 pixel crop instead of 224.
 
@@ -67,11 +85,13 @@ Read this twice: EAC can treat injected input as an unfair advantage, and accoun
 
 ## Tools
 
-Thirteen small programs, all of them offline and replayable against recorded frames. None of them need the game running.
+Fifteen small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
 
 | Tool | What it does |
 |---|---|
-| `autorun.py` | the detect and fire loop, focus-gated |
+| `autorun.py` | the detect and fire loop, focus-gated, predictive |
+| `replay_tracker.py` | runs the tracker over recorded checks and scores where each press lands |
+| `test_needle_tracker.py` | unit tests for the tracker's logic, including the reversed-check path |
 | `calibrate_window.py` | draws the capture box on a frame so you can see the framing |
 | `measure_latency.py` | keypress to pixel round trip |
 | `test_keypress.py` | isolates whether synthetic keys reach the host at all |

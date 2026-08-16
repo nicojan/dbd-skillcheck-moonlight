@@ -31,6 +31,34 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 Read this section first; it is the state as of 2026-08-15.
 
+**2026-08-15 (evening): the predictive tracker is built, validated offline and confirmed firing live.** `dbd/utils/needle_tracker.py` holds the logic, `tools/replay_tracker.py` scores it against every recorded check, `tools/test_needle_tracker.py` covers what the recordings cannot. `autorun.py` fires predictively by default; `--no-predict` restores upstream's reactive behaviour.
+
+Replayed frame by frame, with ground truth measured separately from the whole check:
+
+| set | checks | result | worst error |
+|-----|--------|--------|-------------|
+| `recordings_missed` | 15 | **15 Great** | 2.4 deg |
+| `recordings` | 13 | **13 Great** | 3.3 deg |
+| `recordings_video/oppression` (native 4K, 363 deg/s) | 1 | **Great** | 1.9 deg |
+| Merciless Storm, both clips | 29 | **abstains on all 29** | — |
+
+Live dry-run against a real match fired on two checks: +327 deg/s at 2.5 deg RMS over 32 frames, +352 at 2.1 over 17. The live loop gets *more* frames than the recordings do, so the fit is not frame-starved.
+
+**Four bugs were found and fixed on the way, three of them in code that already existed.** Each produced a plausible number rather than an error:
+
+- **A circular run search inside a non-circular slice.** Looking for the solid Great band within the zone's own samples wrapped from the trailing end round to the leading end and joined them into one phantom band, reporting Great about a zone-width late. It landed the press ~50 deg early on 3 of 13 checks. `measure_zone.py` has the same construction and is now fixed too — it does not fire at that tool's 0.5 deg sampling, only at the 1.0 deg the tracker uses, which is exactly the kind of latency that survives a review.
+- **The frozen-tail trim was defeated by quantisation.** It required two consecutive frames of zero advance, and a frozen needle wobbles half a degree either way, which resets the counter. A 200 ms frozen tail therefore reached the fit and pulled `recordings_missed/check_005` from 325 to 293 deg/s. The bar is now a fraction of the check's own median step. **`analyse_needle.py` has the same weakness and its published rate spreads are affected** — the 290-347 deg/s figure for standard play is inflated at the bottom end; the trimmed set sits at 314-327.
+- **Two of the 22 "deliberately unhit" checks were in fact hit.** `check_005` and `check_006` freeze at 211 and 145 deg, inside Good. They are still usable for zone geometry, which is why this went unnoticed, but they are not clean unhit sweeps.
+- **Live frames are RGB and recorded frames are BGR.** `grab_screenshot()` returns RGB; `cv2.imread` returns BGR. The needle test is `R - max(G,B)`, so feeding it a live frame unconverted measures blueness and finds nothing. Nothing had exercised that path before, because every needle measurement to date ran offline.
+
+**`check_009/010/019` failing the ring-centre fit is explained, and the handoff's hypothesis was wrong.** They are not the short recordings: `check_011` and `check_020` are the same 51 frames and fit fine. They are the only three checks in the set whose recording is *entirely* check — 51 lit frames out of 51, no needle-free frames at either end. The static-UI median is taken with the needle masked out, so a recording with no needle-free frames leaves parts of the base ring permanently masked, the ring stops being a full circle, and the centre peak drops to 61-82 against the 145 a good fit gives. All three are wiggle, which takes the reactive path regardless.
+
+**`measure_zone.py` on the hit set: no problem.** The handoff flagged this as unknown — frozen tails might have broken the median-over-frames assumption. They do not. The 13 repair-heal checks in `recordings` give Great 10.0-11.0, median **10.5**, matching `recordings_missed` exactly. The load-bearing constant now has two independent datasets under it.
+
+**What the tracker is sensitive to is the 72 ms round trip, not the frame rate.** Dropping two frames in three still scores 15 and 12 Greats. Mis-stating the latency by 10 ms drops the unhit set to 11 of 15; by 20 ms, to 2 of 15. Re-measure with `measure_latency.py` after any change to the network, the host or Moonlight's settings and pass `--round-trip-ms`. The two directions are not symmetric: Great is at the leading edge of the success zone, so firing late spills into Good while firing early misses the zone outright — hence `AIM_BIAS_DEG = 1.0`, which aims one degree late on purpose. The sweep behind that value is in the constant's comment.
+
+**Still open:** Merciless Storm's Great geometry (the tracker abstains rather than guessing), off-centre Doctor checks (still outside the 224 crop), and validation of the counter-clockwise path against real footage — every reversed check we have is Merciless Storm, which has no measurable Great band, so the direction handling is covered only by unit tests.
+
 **2026-08-15 (afternoon): third-party recordings closed the two gaps that five live sessions could not.** Downloaded clips of other players are now ingested by `tools/ingest_video.py` into the `recordings/` format, so every analysis tool runs on them unchanged. That gave the first real Doctor/Madness checks and the first Merciless Storm — see *What third-party recordings settled*. It also exposed **two silent bugs in `analyse_needle.py`**, both now fixed, both of which had been producing confident wrong answers about the project's load-bearing assumption:
 
 - It measured the needle angle about the **crop centre (112, 112)** rather than the ring, which sits at **(112, 102)**. On clean native footage that inflated the residual from 0.5 deg to 5.8 deg and made the tool print *"velocity is NOT reliably constant; predictive firing needs a better model"* about a needle holding 300.0 deg/s to within half a degree. It now refines the ring per check.
@@ -328,7 +356,9 @@ The relationship worth keeping in mind: `hit window (ms) = Great band angular wi
 
 2. ~~**Record real skill checks**~~ — **done 2026-08-11.** 14 checks in `recordings/`, 60 frames each spanning ~1.48 s at ~40 fps, each covering the approach, the zone crossing and the aftermath, with per-frame model predictions as ground truth in `manifest.json`. Re-run with `.venv/bin/python tools/record_checks.py --seconds 1500` to collect more.
 
-3. **Predictive firing — THE NEXT THING TO BUILD.** Needs no retraining. Latency is *consistent* (six clean trials spanned 8 ms), and a stable delay is compensable. Track the needle angle across frames with classical CV, estimate angular velocity, and schedule the press to *land* in Great using ~72 ms of lead.
+3. ~~**Predictive firing**~~ — **BUILT 2026-08-15**, see *Resume here*. 29/29 Great across every scorable recorded check, confirmed firing live in dry-run. The design below is what was built, with two additions the design did not anticipate: the aim sits one degree late because the error directions are not symmetric, and the tracker abstains outright when no solid Great band is drawn rather than guessing at one. The original notes follow.
+
+   Needs no retraining. Latency is *consistent* (six clean trials spanned 8 ms), and a stable delay is compensable. Track the needle angle across frames with classical CV, estimate angular velocity, and schedule the press to *land* in Great using ~72 ms of lead.
 
    The algorithm, now that the constants are known:
 
