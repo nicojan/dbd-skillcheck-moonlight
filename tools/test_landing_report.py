@@ -28,6 +28,7 @@ honestly answer.
 
 import os
 import sys
+from time import monotonic
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
@@ -129,6 +130,26 @@ def test_the_boundary_is_the_wobble_not_zero():
     wrapped = [359.0, 0.5, 359.5]            # a freeze that straddles 0 deg
     check("a freeze across 0 deg is still a freeze", freeze_angle(wrapped) == 359.5,
           freeze_angle(wrapped))
+
+
+def test_fire_waits_in_milliseconds():
+    # The bug that cost four armed matches: fire() slept `press_at_ms - now_ms` as if it
+    # were seconds, so a 20 ms lead became 20 seconds. Nothing caught it because --dry-run
+    # returns before the sleep, the reactive path passes 0, and the offline replay never
+    # sleeps at all. Only the armed path could ever have shown it, and its symptom was
+    # `needle gone before it could be read` — which reads like a detection fault.
+    import autorun
+    dry = SimpleNamespace(dry_run=True)
+
+    t0 = monotonic()
+    autorun.fire(dry, 40.0)
+    elapsed_ms = (monotonic() - t0) * 1000.0
+    check("a 40 ms lead sleeps ~40 ms, not 40 s", 30.0 <= elapsed_ms <= 200.0,
+          f"slept {elapsed_ms:.0f} ms")
+
+    t0 = monotonic()
+    autorun.fire(dry, -5.0)
+    check("a lead already past does not sleep", (monotonic() - t0) * 1000.0 < 20.0)
 
 
 def test_stays_silent_in_dry_run_and_without_a_zone():

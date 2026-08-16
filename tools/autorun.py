@@ -55,6 +55,16 @@ FRAME_MS_DECAY = 0.8      # EMA weight on the previous estimate
 TRACK_DROP_FRAMES = 3     # consecutive check-free frames that end a track
 FREEZE_WATCH_SECONDS = 0.30   # how long to watch for the needle to freeze after a press
 
+# How long SPACE is held down. This is NOT cosmetic: the press was 5 ms, which a desktop
+# text field registers fine (key events are queued, so duration is irrelevant) but a game
+# polling input once per rendered frame can miss entirely — 16.7 ms between polls at 60 fps,
+# and Moonlight batches the press and release over the network so the host re-injects them
+# back to back. That is why measure_latency.py could fill a text field while the armed run
+# never landed a single check. 50 ms matches test_keypress.py, the tool that verifies
+# delivery, and is within the range of a normal human tap. Only key-DOWN decides when the
+# hit registers, so a longer hold costs nothing in timing accuracy.
+PRESS_HOLD_SECONDS = 0.05
+
 # A Space transition takes time to settle, and Moonlight registers ~16 windows while
 # it does. Resolving geometry mid-transition picked a menu-bar-inset window once
 # (218px crop instead of 224), so wait for the dust to settle before re-resolving.
@@ -93,15 +103,23 @@ def log(message):
     print(f"[{strftime('%H:%M:%S')}] {message}", flush=True)
 
 
-def fire(args, wait_seconds):
-    """Sleep out the remaining lead, then tap SPACE. The sleep is the whole point."""
+def fire(args, wait_ms):
+    """Sleep out the remaining lead, then tap SPACE. The sleep is the whole point.
 
-    if wait_seconds > 0:
-        sleep(wait_seconds)
+    Takes MILLISECONDS. It used to take seconds while the only caller that passed a
+    non-zero value handed it `decision.press_at_ms - now_ms`, so every predictive press
+    slept 1000x too long: a 20 ms lead became a 20 second one. The reactive path passes 0
+    and was unaffected, which is why reactive pressed the game correctly the whole time
+    and predictive appeared never to press at all. The unit now lives in the parameter
+    name, and every value on both sides of this boundary is suffixed `_ms`.
+    """
+
+    if wait_ms > 0:
+        sleep(wait_ms * 0.001)
     if args.dry_run:
         return
     PressKey(SPACE)
-    sleep(0.005)
+    sleep(PRESS_HOLD_SECONDS)
     ReleaseKey(SPACE)
 
 
