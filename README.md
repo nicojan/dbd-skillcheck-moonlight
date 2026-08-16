@@ -87,6 +87,47 @@ Every predictive shot logs the fitted rate, the fit residual, the frame count be
 
 Pin the geometry if the window has ever moved mid-session. Moonlight registers about sixteen windows, one of them a 1280x628 decoy that clears the size floor, and a refresh firing mid Space-transition once latched a menu-bar-inset window that gave a 218 pixel crop instead of 224.
 
+### The armed run
+
+Everything above is verified offline and in dry-run. The one claim no amount of replay can settle is whether a self-reported `GREAT` matches what the game actually awarded, and that needs an armed match. Private games only — see the warning below.
+
+**Before starting.** Re-measure the latency, because it is the one input the whole thing is sensitive to and it moves with the network, the host and Moonlight's settings:
+
+```bash
+.venv/bin/python tools/measure_latency.py
+```
+
+If the median is not close to 72 ms, pass the real figure as `--round-trip-ms`. A 10 ms error costs about a quarter of the Greats; 20 ms costs nearly all of them.
+
+Then confirm the framing is right before arming, and keep the log:
+
+```bash
+.venv/bin/python tools/autorun.py --dry-run                       # ~1 min, confirm detections
+.venv/bin/python tools/autorun.py 2>&1 | tee armed-$(date +%H%M).log
+```
+
+Add `--pin-geometry` if the geometry warning has ever appeared.
+
+**What a good shot looks like.** Two lines per check — what it decided, then what actually happened:
+
+```
+FIRE predictive: repair-heal (out) — +327 deg/s, fit 2.5 deg RMS over 32 frames, aiming 300.0 deg
+  landed 301.4 deg — GREAT, +1.4 deg from Great centre
+```
+
+The class on the first line is normally `(out)`, not `(great)`. That is the design working: it commits about 72 ms before the needle reaches the band, while the model still calls it out.
+
+**What to compare.** The bot's verdict against the game's own feedback, check by check. The offline replay says 29/29 Great; anything much below that armed means the latency figure is wrong, and the *direction* says which way — `good` verdicts with a positive error mean it is arriving late, so the true round trip is longer than the number it was given.
+
+**When to stop and re-measure rather than push on:**
+
+- `landing: needle still sweeping after the press` on repair or heal checks. The press is not connecting at all — check the Accessibility grant for the terminal you launched from, since keys go nowhere silently without it.
+- `HIT reactive: … tracker stood down` appearing often. The tracker is not finding a zone; the framing is likely wrong.
+- `WARNING geometry changed`. Restart with `--pin-geometry`.
+- Verdicts that disagree with the game. Stop and re-run `measure_latency.py` before collecting more.
+
+Read this twice: EAC can treat injected input as an unfair advantage, and accounts get banned for it. Upstream restricts the tool to private games. This fork does nothing to improve those odds.
+
 Upstream's Gradio web UI still runs through `python app.py`, with a `moonlight` capture backend added.
 
 Read this twice: EAC can treat injected input as an unfair advantage, and accounts get banned for it. Upstream restricts the tool to private games. This fork does nothing to improve those odds.
