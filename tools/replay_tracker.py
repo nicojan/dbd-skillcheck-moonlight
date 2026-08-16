@@ -31,8 +31,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
 
 from dbd.utils.needle_tracker import (
-    ROUND_TRIP_MS, Fit, Sample, TrackerState, decide, find_zone, fit_sweep, lit_span,
-    needle_angle, observe, refine_centre, static_image, trim_frozen_tail,
+    ROUND_TRIP_MS, Fit, Sample, TrackerState, decide, find_zone, fit_sweep, freeze_angle,
+    lit_span, needle_angle, observe, refine_centre, score_freeze, static_image,
+    trim_frozen_tail,
 )
 
 SWEEPING = ("repair-heal", "full white", "full black")  # wiggle oscillates; excluded
@@ -49,6 +50,9 @@ def parse_args():
     p.add_argument("--decimate", type=int, default=1,
                    help="keep every Nth frame — the recordings run at ~40 fps and the live "
                         "loop manages 34, so 2 is a pessimistic stress test")
+    p.add_argument("--human", action="store_true",
+                   help="score the PLAYER's presses instead of the tracker's, from the "
+                        "angle the needle froze at. Needs hit recordings")
     p.add_argument("--verbose", action="store_true", help="print each check's decision trail")
     return p.parse_args()
 
@@ -175,11 +179,61 @@ def score(decision, truth_fit, zone, round_trip_ms):
     }
 
 
+def score_human(dirs):
+    """Grade the PLAYER's presses, from the angle the needle froze at.
+
+    A hit stops the needle dead, so a hit recording carries the landing position of a real
+    human press, scored against the same drawn zone by the same code. It is the baseline
+    the tracker has to beat, and it is measured rather than remembered.
+    """
+
+    header = f"{'check':<14}{'landed':>9}{'err deg':>9}  verdict"
+    print(header)
+    print("-" * len(header))
+
+    scored = []
+    for d in dirs:
+        name = os.path.basename(d)
+        records, images = load_check(d)
+        if len(records) < 8 or kind(records) == "wiggle":
+            continue
+
+        static = static_image(images)
+        cx, cy, ring_r, _ = refine_centre(static)
+        zone = find_zone(static, (cx, cy), ring_r)
+        angles = [needle_angle(img, (cx, cy))[0] for img in images]
+        settled = freeze_angle(angles)
+
+        if zone is None or settled is None:
+            print(f"{name:<14}{'—':>9}{'—':>9}  no freeze captured")
+            continue
+
+        verdict, err = score_freeze(zone, settled)
+        scored.append((verdict, err))
+        print(f"{name:<14}{settled:>9.1f}{err:>+9.1f}  {verdict}")
+
+    if not scored:
+        return
+    errs = np.array([e for _, e in scored])
+    print(f"\n{len(scored)} presses by the player: "
+          f"{sum(v == 'GREAT' for v, _ in scored)} Great, "
+          f"{sum(v == 'good' for v, _ in scored)} good, "
+          f"{sum(v == 'MISS' for v, _ in scored)} miss")
+    print(f"  error vs Great centre: median {np.median(np.abs(errs)):.1f} deg, "
+          f"bias {errs.mean():+.1f} deg, worst {np.abs(errs).max():.1f} deg")
+    if (errs > 0).all():
+        print("  every press landed LATE — the same arriving-late diagnosis the timing "
+              "budget predicts, measured here without reference to any latency number")
+
+
 def main():
     args = parse_args()
     dirs = sorted(glob.glob(os.path.join(args.recordings, "check_*")))
     if not dirs:
         raise SystemExit(f"no check_* dirs under {args.recordings}")
+
+    if args.human:
+        return score_human(dirs)
 
     header = (f"{'check':<14}{'type':>13}{'deg/s':>8}{'great':>7}{'mid':>7}"
               f"{'lands':>8}{'err deg':>9}{'err ms':>8}  verdict")

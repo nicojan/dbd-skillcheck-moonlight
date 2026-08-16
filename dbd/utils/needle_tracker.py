@@ -68,6 +68,15 @@ CLOSE_DEG = 4.0       # bridge dropouts this short; antialiasing punches 1-2 deg
 # --- fitting and firing --------------------------------------------------------------
 MIN_ZONE_FRAMES = 5      # frames of static UI needed before the zone median is trustworthy
 ZONE_RETRY_EVERY = 3     # frames between retries while no zone has been found
+
+# Bounds on what a track retains. A discrete check lasts about a second, but Merciless
+# Storm is ONE continuous check running 20 s with no reset and no freeze — 680 frames at
+# live rates, and the tracker abstains on it, so nothing ever clears the buffer. At
+# 224x224x3 that is 100 MB of retained frames climbing towards the length of the match.
+# Keeping the most recent few is enough: the zone is static, so any window sees it.
+MAX_FRAMES = 24
+MAX_SAMPLES = 60         # ~2 s of sweep; a longer fit window buys nothing and drifts
+FREEZE_TOLERANCE_DEG = 3.0   # wobble a genuinely frozen needle still shows; see freeze_angle
 MIN_FIT_FRAMES = 5       # samples needed before a slope is worth acting on
 MAX_FIT_RMS_DEG = 8.0    # a fit worse than this is an instrument fault; do not fire on it
 MIN_RATE_DEG_S = 120.0   # below this it is not a sweeping check
@@ -135,6 +144,7 @@ class TrackerState:
 
     samples: Tuple[Sample, ...] = ()
     frames: Tuple[np.ndarray, ...] = ()
+    seen: int = 0           # frames observed in total; `frames` is capped, this is not
     centre: Tuple[float, float] = CENTRE_PRIOR
     ring_r: float = 65.0
     centre_fixed: bool = False
@@ -446,25 +456,29 @@ def observe(state, frame, t_ms):
     angle, strength = needle_angle(frame, state.centre)
     new = replace(
         state,
-        samples=state.samples + (Sample(t_ms, angle, strength),),
-        frames=state.frames + (frame,),
+        samples=(state.samples + (Sample(t_ms, angle, strength),))[-MAX_SAMPLES:],
+        frames=(state.frames + (frame,))[-MAX_FRAMES:],
+        seen=state.seen + 1,
     )
 
     # The centre is refined ONCE, from the first frames that show the static UI, and then
     # reused. Re-locating per frame puts the locator's own jitter straight into the angle:
     # measured per frame the fast-build checks fit at 7.9 deg RMS, and at 3.9 with one
     # centre per check. It is the same data.
-    if not new.centre_fixed and len(new.frames) >= MIN_ZONE_FRAMES:
+    if not new.centre_fixed and new.seen >= MIN_ZONE_FRAMES:
         static = static_image(new.frames)
         cx, cy, ring_r, _ = refine_centre(static)
         new = replace(new, centre=(cx, cy), ring_r=ring_r, centre_fixed=True,
                       zone=find_zone(static, (cx, cy), ring_r))
         # The angles so far were measured about the prior, up to 3 px away. Re-measure
         # them about the refined centre rather than fitting a line through two conventions.
-        new = replace(new, samples=tuple(
-            Sample(s.t_ms, *needle_angle(f, new.centre))
-            for s, f in zip(new.samples, new.frames)))
-    elif new.zone is None and len(new.frames) % ZONE_RETRY_EVERY == 0:
+        # Pair from the END: `samples` and `frames` are capped at different lengths, so
+        # zipping from the front would silently pair a sample with the wrong frame once
+        # either cap bites.
+        redone = tuple(Sample(s.t_ms, *needle_angle(f, new.centre))
+                       for s, f in zip(new.samples[-len(new.frames):], new.frames))
+        new = replace(new, samples=new.samples[:-len(redone)] + redone)
+    elif new.zone is None and new.seen % ZONE_RETRY_EVERY == 0:
         # The zone can be missing early — the needle sitting across it, a dropped frame —
         # and appear once more static frames accumulate. Retrying costs ~9 ms of a ~29 ms
         # frame, so retry periodically rather than every frame.
@@ -483,6 +497,13 @@ class Decision:
     target_deg: Optional[float] = None
     lands_at_ms: Optional[float] = None
 
+    # True when a real needle is sweeping but the press cannot be scheduled — no Great
+    # band drawn, or the band already passed. Those are the cases where reacting to the
+    # classifier is the right floor. It is deliberately FALSE when the fit itself is
+    # unconvincing, because "the model is confident and the needle is not moving" is what
+    # a menu looks like: a red-ringed perk icon in the loadout classifies at 1.000.
+    may_react: bool = False
+
 
 def decide(state, now_ms, round_trip_ms=ROUND_TRIP_MS):
     """Should we press, and when? Pure — the caller owns the clock and the keyboard."""
@@ -500,7 +521,7 @@ def decide(state, now_ms, round_trip_ms=ROUND_TRIP_MS):
     if not (MIN_RATE_DEG_S <= rate <= MAX_RATE_DEG_S):
         return Decision(reason=f"rate {fit.rate_deg_s:.0f} deg/s out of range", fit=fit)
     if state.zone is None:
-        return Decision(reason="no zone drawn yet", fit=fit)
+        return Decision(reason="no zone drawn yet", fit=fit, may_react=True)
 
     # Never bias past the band's own trailing edge: on a narrow Great — Unnerving Presence
     # and Overcharge both shrink the zone — a fixed offset would aim clean out of it.
@@ -512,13 +533,43 @@ def decide(state, now_ms, round_trip_ms=ROUND_TRIP_MS):
     # A whole revolution of waiting means the needle has already passed Great. Discrete
     # checks end after one sweep, so there is no second crossing to aim at.
     if (lands - now_ms) > 360.0 / rate * 1000.0 * 0.95:
-        return Decision(reason="Great already passed", fit=fit, target_deg=target)
+        return Decision(reason="Great already passed", fit=fit, target_deg=target,
+                        may_react=True)
     if press_at < now_ms:
-        return Decision(reason=f"too late by {now_ms - press_at:.0f} ms",
-                        fit=fit, target_deg=target, lands_at_ms=lands)
+        return Decision(reason=f"too late by {now_ms - press_at:.0f} ms", fit=fit,
+                        target_deg=target, lands_at_ms=lands, may_react=True)
 
     return Decision(press_at_ms=press_at, reason="scheduled", fit=fit,
                     target_deg=target, lands_at_ms=lands)
+
+
+def mark_fired(state, t_ms):
+    """Record that the key has gone down, so `decide` cannot schedule a second press.
+
+    The live loop drops the tracker after firing, which makes this redundant there — but
+    a safety property that depends on every caller remembering to do something is not a
+    safety property. Firing twice into one check would land the second press outside the
+    zone and fail a check the first press had already won.
+    """
+
+    return replace(state, fired_at_ms=t_ms)
+
+
+def freeze_angle(angles, tolerance=FREEZE_TOLERANCE_DEG, window=3):
+    """The angle a needle has settled at, or None if it is still sweeping.
+
+    A press that connects stops the needle dead; a press that misses does not stop it at
+    all. Reading the last angle either way would report a confident landing for a position
+    the press had nothing to do with, so the last few reads have to agree before any
+    verdict is allowed. The tolerance is the wobble a genuinely frozen needle still shows
+    under angular quantisation, not zero.
+    """
+
+    if len(angles) < window:
+        return None
+    tail = angles[-window:]
+    spread = max(abs((b - a + 540.0) % 360.0 - 180.0) for a in tail for b in tail)
+    return tail[-1] if spread <= tolerance else None
 
 
 def score_freeze(zone, freeze_deg):

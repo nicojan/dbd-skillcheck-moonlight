@@ -141,6 +141,12 @@ def trim_frozen_tail(rows):
     never fires. Two consecutive non-advancing frames means the sweep is over; a single
     one can just be angular quantisation at a slow sweep rate.
 
+    "Not advancing" cannot mean "did not move at all". Angular quantisation makes a frozen
+    needle wobble half a degree either way, which resets a strict counter and lets the
+    whole tail through: on `recordings_missed/check_005` a 200 ms frozen tail survived and
+    dragged the fitted rate from 325 to 293 deg/s. The bar is a fraction of the check's own
+    median step, matching `dbd/utils/needle_tracker.py`.
+
     "Advance" is signed by the check's own direction. The Doctor's Madness makes a check
     rotate counter-clockwise, and against a hardcoded clockwise assumption every frame of
     such a check reads as stalled — so the whole check is thrown away on its second frame,
@@ -151,15 +157,16 @@ def trim_frozen_tail(rows):
     if not steps:
         return rows
     sign = 1.0 if float(np.median(steps)) >= 0 else -1.0
+    bar = max(2.0, 0.4 * float(np.median(np.abs(steps))))
 
     kept = []
     stalled = 0
     for i, row in enumerate(rows):
         if i > 0:
             advanced = sign * ((row[1] - rows[i - 1][1] + 540) % 360 - 180)  # wrap-safe
-            stalled = stalled + 1 if advanced <= 0 else 0
+            stalled = stalled + 1 if advanced < bar else 0
             if stalled >= 2:
-                break
+                return kept[:-1]  # the first stalled frame is already frozen too
         kept.append(row)
     return kept
 

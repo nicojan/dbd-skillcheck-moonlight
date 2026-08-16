@@ -31,6 +31,14 @@ So the bot no longer presses when it sees a Great. It locates the ring, reads th
 
 The Great band is ±5.25 deg about its centre, so that is the error budget. Drop two frames in three and it still scores 15 and 12; the approach is not short of frames.
 
+For scale, the same code can grade the *player's* presses, because a hit freezes the needle and that frozen angle is where the press landed:
+
+```bash
+.venv/bin/python tools/replay_tracker.py recordings --human
+```
+
+Ten scorable human presses: **4 Great, 6 good, and every single one late**, median 9.0 deg past the centre of the band. That is the arriving-late diagnosis measured directly, without reference to any latency figure.
+
 What it *is* sensitive to is the 72 ms constant. Mis-state it by 10 ms and Greats fall to 11 of 15; by 20 ms and they fall to 2. Re-run `tools/measure_latency.py` after any change to the network path, the host, or Moonlight's settings, and pass the result as `--round-trip-ms`. The two directions are not symmetric — Great sits at the leading edge of the success zone, so firing late spills into Good while firing early misses the zone entirely — so the aim sits one degree late by design.
 
 ## What differs from upstream
@@ -85,13 +93,14 @@ Read this twice: EAC can treat injected input as an unfair advantage, and accoun
 
 ## Tools
 
-Fifteen small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
+Sixteen small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
 
 | Tool | What it does |
 |---|---|
 | `autorun.py` | the detect and fire loop, focus-gated, predictive |
 | `replay_tracker.py` | runs the tracker over recorded checks and scores where each press lands |
 | `test_needle_tracker.py` | unit tests for the tracker's logic, including the reversed-check path |
+| `test_landing_report.py` | tests the armed-only self-scoring path, which no dry-run reaches |
 | `calibrate_window.py` | draws the capture box on a frame so you can see the framing |
 | `measure_latency.py` | keypress to pixel round trip |
 | `test_keypress.py` | isolates whether synthetic keys reach the host at all |
@@ -118,8 +127,8 @@ Numbers are from a 2560x1080 ultrawide, Moonlight fullscreen, the stream pillarb
 | Live throughput | 34 fps (upstream targets 120) |
 | Keypress to pixel | 72 ms median |
 | Capture cost, 224 px vs full frame | 22.2 ms vs 26.9 ms, so 4.7 ms buys 41 times the pixels |
-| Needle sweep rate | 291 to 328 deg/s, median 320 (standard play); 214 to 440 on a faster build |
-| Angle fit residual | 2.1 to 5.3 deg RMS on our captures, 0.44 to 2.7 on native 60 fps footage |
+| Needle sweep rate | 294 to 328 deg/s, median 325 (standard play); 214 to 440 on a faster build |
+| Angle fit residual | 1.9 to 2.8 deg RMS on our captures, 0.44 to 2.7 on native 60 fps footage |
 | Great zone, from pixels | 10.5 deg, range 10.0 to 10.5 across 13 checks |
 | Success zone, from pixels | 49.5 deg total, Great at the leading edge in 13 of 13 |
 
@@ -137,7 +146,7 @@ These each cost a day.
 
 **The 224 pixel crop is not arbitrary.** It is `224/1080 * content_height`, because the model was trained on checks occupying a fixed fraction of a 1080p frame. Feed it the whole window and the check shrinks to a fifth of its trained height and distorts into an ellipse.
 
-**A hit freezes the needle, and frame-equality will not detect it.** The game stops the needle dead on a successful hit, but the stream encoder keeps jittering pixels, so consecutive frames differ while the angle is bit-for-bit identical. An early attempt tested frame content for equality, never fired, and left frozen tails in the velocity fit; four of thirteen checks then looked like they had non-constant angular velocity. Detect the freeze by the needle failing to advance instead.
+**A hit freezes the needle, and frame-equality will not detect it.** The game stops the needle dead on a successful hit, but the stream encoder keeps jittering pixels, so consecutive frames differ while the angle is bit-for-bit identical. An early attempt tested frame content for equality, never fired, and left frozen tails in the velocity fit; four of thirteen checks then looked like they had non-constant angular velocity. Detect the freeze by the needle failing to advance instead — and not by "did not move at all", because a frozen needle wobbles half a degree with quantisation, which resets a strict stall counter and lets a 200 ms tail through anyway. The bar has to be a fraction of the check's own median step. Fixing that alone tightened the measured rate spread from 290-347 to 294-328 deg/s, halved the fit residual, and removed the one fit in the Hyperfocus session that had been dismissed as junk.
 
 **A confident class is not a check detector.** The model returns `repair-heal (out)` at 1.000 confidence on a red-ringed perk icon in the loadout menu, and labels the check-free frames either side of a real check `full black (out)` rather than `None`. Confidence is therefore useless as a filter. The class the model assigns is the only thing standing between a stray perk icon and a wrong keypress, and that is thinner protection than it looks.
 

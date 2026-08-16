@@ -35,7 +35,8 @@ from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.needle_tracker import (
-    ROUND_TRIP_MS, TrackerState, decide, needle_angle, observe, score_freeze,
+    MIN_NEEDLE_STRENGTH, ROUND_TRIP_MS, TrackerState, decide, freeze_angle, mark_fired,
+    needle_angle, observe, score_freeze,
 )
 
 IDLE_POLL_SECONDS = 0.20
@@ -122,15 +123,21 @@ def report_landing(model, tracker, track_t0, args):
     while monotonic() < deadline:
         bgr = model.grab_screenshot()[:, :, ::-1]
         angle, strength = needle_angle(bgr, tracker.centre)
-        if strength >= 20.0:
+        if strength >= MIN_NEEDLE_STRENGTH:
             angles.append(angle)
 
     if len(angles) < 3:
         log("  landing: needle gone before it could be read")
         return
 
-    verdict, err = score_freeze(tracker.zone, angles[-1])
-    log(f"  landed {angles[-1]:.1f} deg — {verdict}"
+    settled = freeze_angle(angles)
+    if settled is None:
+        log("  landing: needle still sweeping after the press — it did not connect, "
+            "or this is Merciless Storm, which never stops")
+        return
+
+    verdict, err = score_freeze(tracker.zone, settled)
+    log(f"  landed {settled:.1f} deg — {verdict}"
         + (f", {err:+.1f} deg from Great centre" if err is not None else ""))
 
 
@@ -265,6 +272,7 @@ def run(args):
                         continue
 
                     hits += 1
+                    tracker = mark_fired(tracker, now_ms)
                     fire(args, decision.press_at_ms - now_ms)
                     fit = decision.fit
                     log(f"{'WOULD FIRE' if args.dry_run else 'FIRE'} predictive: {desc} — "
@@ -279,7 +287,7 @@ def run(args):
                 # A fitted check with nowhere to aim (no Great band drawn, or the band
                 # already passed) is exactly the reactive case: pressing on the model's
                 # cue lands in Good, which beats not pressing at all.
-                elif should_hit and decision.fit is not None:
+                elif should_hit and decision.may_react:
                     hits += 1
                     fire(args, 0.0)
                     log(f"{'WOULD HIT' if args.dry_run else 'HIT'} reactive: {desc} — "

@@ -57,6 +57,37 @@ Live dry-run against a real match fired on two checks: +327 deg/s at 2.5 deg RMS
 
 **What the tracker is sensitive to is the 72 ms round trip, not the frame rate.** Dropping two frames in three still scores 15 and 12 Greats. Mis-stating the latency by 10 ms drops the unhit set to 11 of 15; by 20 ms, to 2 of 15. Re-measure with `measure_latency.py` after any change to the network, the host or Moonlight's settings and pass `--round-trip-ms`. The two directions are not symmetric: Great is at the leading edge of the success zone, so firing late spills into Good while firing early misses the zone outright — hence `AIM_BIAS_DEG = 1.0`, which aims one degree late on purpose. The sweep behind that value is in the constant's comment.
 
+**2026-08-15 (later): the freeze-trim fix was ported to `analyse_needle.py`, and it moves published numbers.** `sweep_rates.py` imports the trim from there, so both tools move together — corrected figures below. Every change is in the same direction: the old numbers were inflated by frozen tails that the strict stall test let through.
+
+| set | was | now |
+|-----|-----|-----|
+| `recordings` rate spread | 290-347 deg/s, RMS 2.8 median | **294-328**, RMS **2.2** |
+| `recordings_missed` rate spread | — | **319-329**, RMS ~1.9 |
+| Hyperfocus session rate spread | 219-362, median 318, RMS 3.9 | **293-368**, median **325**, RMS **2.0** |
+| fit error as % of required lead | 16% median | **9-10%** median |
+| implied timing error | ~12 ms | **~6 ms** |
+
+Two documented claims change as a result:
+
+- **"One fit in 27 is junk (check 26, RMS 11.84) and should be excluded by an RMS threshold" is obsolete.** That fit was a frozen tail. No check in the session now exceeds 2.84 RMS, and the outlier-exclusion advice is no longer needed.
+- **The Hyperfocus staircase is confirmed and got *cleaner*.** Checks 5-8 (gaps 5.9, 5.9, 4.0 s) now read 328.6 → 340.1 → 353.9 → 367.7, i.e. +3.5%, +4.1%, +3.9% against a predicted +4% — errors of -0.5%, +0.1%, -0.1%, against the -1.1% to -2.3% previously recorded. A correction that tightens an independent prediction it was not aimed at is worth more than the measurement itself.
+
+Note the direction of the old error: it made the sweep look *more* variable and *less* linear than it is. Both were arguments for the tracker, so nothing built on them was wrong — but "rate varies between checks" rests on the Hyperfocus staircase and the fast build, not on the spread within a single standard-play set, which is now tight enough (319-329) that the tool says so itself.
+
+**2026-08-15 (later still): the armed-only path is hardened, and the human baseline is measured.** Five things fixed that dry-run could never have exposed, because none of them are on the dry-run path:
+
+- **Unbounded frame retention.** `TrackerState` kept every frame of a check. A discrete check is a second, but Merciless Storm is one continuous check running 20 s that the tracker abstains on — so nothing ever cleared the buffer. 680 frames at 224x224x3 is 100 MB, climbing for the length of the match. Frames are now capped at 24 and samples at 60, with a separate `seen` counter so the retry cadence does not break when the caps bite.
+- **The reactive fallback could fire on a static needle.** It required only "a fit exists", and a fit exists for a needle that is not moving. A menu with a confident class is exactly that — the loadout perk icon classifies `repair-heal (out)` at 1.000. The fallback now requires `may_react`, which `decide` sets only when a real sweep is present and the press merely cannot be scheduled.
+- **`report_landing` assumed the last angle it saw was a freeze.** The needle only stops if the press connected; on a miss it sweeps straight on, and the function would have reported a confident verdict about a position the press had nothing to do with. Extracted as `freeze_angle`, which requires the last three reads to agree to within the wobble.
+- **`fired_at_ms` was a dead field.** `decide` checked it and nothing set it, so the no-double-fire property rested entirely on the caller remembering to drop the tracker. `mark_fired` now sets it.
+- **A hardcoded strength floor** in `report_landing` duplicated `MIN_NEEDLE_STRENGTH`.
+
+**The first version of the test for this passed while being wrong, which is worth recording.** It drove `report_landing` through a stub monitor. The function samples against a wall clock; the stub ran out of frames inside 300 ms and repeated its last one; three identical reads look exactly like a freeze. So the sweeping case — the one the test existed for — passed by accident. The fix was to split the pure decision out and test it against angles measured off real recordings, and to test the wall-clock wrapper only for what a stub can honestly answer. **A stub that runs out of data does not fail, it fabricates.**
+
+**The human baseline: `tools/replay_tracker.py recordings --human`.** A hit freezes the needle, so the frozen angle is where the player's press landed, scored against the same drawn zone by the same code. Ten scorable presses: **4 Great, 6 good, 0 miss, and every single one late** — median 9.0 deg past the band's centre, bias +10.3, worst +21.5. That is the arriving-late diagnosis measured directly, with no latency number involved. The tracker's replay over the same recordings is 13/13 Great at median 1.0 deg and a bias of -0.3.
+
+Also corrected while doing this: **only 10 of the 14 hit recordings actually capture the freeze.** The other four end while the needle is still moving. "All were hit, so every one has a frozen tail" is true of the checks, not of the recordings.
+
 **Still open:** Merciless Storm's Great geometry (the tracker abstains rather than guessing), off-centre Doctor checks (still outside the 224 crop), and validation of the counter-clockwise path against real footage — every reversed check we have is Merciless Storm, which has no measurable Great band, so the direction handling is covered only by unit tests.
 
 **2026-08-15 (afternoon): third-party recordings closed the two gaps that five live sessions could not.** Downloaded clips of other players are now ingested by `tools/ingest_video.py` into the `recordings/` format, so every analysis tool runs on them unchanged. That gave the first real Doctor/Madness checks and the first Merciless Storm — see *What third-party recordings settled*. It also exposed **two silent bugs in `analyse_needle.py`**, both now fixed, both of which had been producing confident wrong answers about the project's load-bearing assumption:
