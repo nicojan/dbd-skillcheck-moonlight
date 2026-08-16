@@ -151,8 +151,15 @@ def close_gaps(mask, width_deg=CLOSE_DEG):
     return out
 
 
-def longest_run(mask):
-    """Longest circular run of True, as (start_index, length), or None if too short."""
+def longest_run(mask, circular=True):
+    """Longest run of True, as (start_index, length), or None if too short.
+
+    `circular` must be False when the mask is a slice of the circle rather than the whole
+    of it. Searching the zone's own samples circularly lets a few lit samples at its
+    trailing end join the solid band at its leading end into one phantom Great band, which
+    reports Great roughly a zone-width late. It does not fire at this tool's 0.5 deg
+    sampling, but it did at the 1.0 deg the live tracker uses, on 3 of 13 checks.
+    """
 
     n = len(mask)
     if not mask.any():
@@ -161,9 +168,10 @@ def longest_run(mask):
         return (0, n)
 
     best_len = best_start = cur_len = cur_start = 0
-    start = int(np.argmax(~mask))  # begin at a False so no run is split by the wrap
+    # Begin at a False so no run is split by the wrap; irrelevant when not circular.
+    start = int(np.argmax(~mask)) if circular else 0
     for k in range(n):
-        i = (start + k) % n
+        i = (start + k) % n if circular else k
         if mask[i]:
             if cur_len == 0:
                 cur_start = i
@@ -211,7 +219,7 @@ def measure(check_dir):
     z_start, z_len = zone
     idx = [(z_start + k) % len(angles) for k in range(z_len)]
 
-    great = longest_run(runs[idx] >= FILL_RUN_PX)
+    great = longest_run(runs[idx] >= FILL_RUN_PX, circular=False)
     great_deg = great[1] * ANGLE_STEP if great else 0.0
 
     return {
