@@ -36,7 +36,7 @@ from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.needle_tracker import (
     MIN_NEEDLE_STRENGTH, ROUND_TRIP_MS, TrackerState, decide, freeze_angle, freeze_onset,
-    mark_fired, needle_angle, observe, score_freeze,
+    mark_fired, needle_angle, observe, score_freeze, time_to_angle,
 )
 
 IDLE_POLL_SECONDS = 0.20
@@ -138,7 +138,7 @@ def fire(args, wait_ms):
     return pressed_at
 
 
-def report_landing(model, tracker, track_t0, args, pressed_at):
+def report_landing(model, tracker, track_t0, args, pressed_at, fit=None):
     """Read where the press landed and how long it took to get there.
 
     A successful hit stops the needle dead at the hit position, so the frozen angle is the
@@ -147,10 +147,17 @@ def report_landing(model, tracker, track_t0, args, pressed_at):
     from a Great/Good tally at the end of a match, which is how a 3x measurement error
     went unnoticed here before.
 
-    The same frames also date the freeze, and press -> freeze-visible IS the closed-loop
-    round trip. Reporting it per check is the only measurement of that number taken under
-    real armed-run load; `measure_latency.py` takes it idle, in its own process, against a
-    host text field. When the two disagree, this one is the one that describes the run.
+    The round trip comes from WHERE the needle stopped, not from when we noticed: the fit
+    says when our capture showed that angle, and the gap from key-down to that instant is
+    the closed-loop latency. Timing the freeze off the tail reads directly was the first
+    attempt and it is not robust — a single stray read during the failed-check animation
+    truncates the search and inflates the figure, which it did on 2026-08-15, reporting
+    409 ms for a freeze the needle's own position puts at 88. The tail-read figure is kept
+    as a cross-check, because the two agreeing is worth something and the two disagreeing
+    is worth more.
+
+    This is the only measurement of the round trip taken under real armed-run load;
+    `measure_latency.py` takes it idle, in its own process, against a host text field.
     """
 
     if args.dry_run or tracker.zone is None:
@@ -178,16 +185,23 @@ def report_landing(model, tracker, track_t0, args, pressed_at):
         return
 
     verdict, err = score_freeze(tracker.zone, settled)
-    onset = freeze_onset(readings)
-    # The grab interval bounds the resolution: the freeze is only visible on the next grab
-    # after it happens, so the figure is late by up to one interval and is reported with it.
-    grab_ms = (readings[-1][0] - readings[0][0]) * 1000.0 / max(1, len(readings) - 1)
-
     log(f"  landed {settled:.1f} deg — {verdict}"
         + (f", {err:+.1f} deg from Great centre" if err is not None else ""))
-    if onset is not None:
-        log(f"  round trip {(onset - pressed_at) * 1000:.0f} ms measured (+/-{grab_ms:.0f} "
-            f"grab), against {args.round_trip_ms:.0f} ms assumed")
+
+    press_ms = (pressed_at - track_t0) * 1000.0
+    measured = time_to_angle(fit, settled, press_ms) if fit is not None else None
+    if measured is None:
+        return
+
+    # The correction is signed and directly actionable: pass it as --round-trip-ms. Landing
+    # early means we led by more than the loop actually costs, and early is the expensive
+    # error — Great sits at the leading edge of the success zone, so a late press spills
+    # into Good while an early one misses outright.
+    round_trip_ms = measured - press_ms
+    onset = freeze_onset(readings)
+    cross = f", tail read says {(onset - pressed_at) * 1000:.0f}" if onset is not None else ""
+    log(f"  round trip {round_trip_ms:.0f} ms measured, against "
+        f"{args.round_trip_ms:.0f} ms assumed{cross}")
 
 
 def run(args):
@@ -337,7 +351,7 @@ def run(args):
                     log(f"  timing: frame age {frame_age_ms:.0f} ms at decide, lead "
                         f"{requested_ms:.0f} ms requested / "
                         f"{(pressed_at - track_t0) * 1000 - now_ms:.0f} ms slept")
-                    report_landing(model, tracker, track_t0, args, pressed_at)
+                    report_landing(model, tracker, track_t0, args, pressed_at, decision.fit)
                     tracker = None
                     sleep(HIT_COOLDOWN_SECONDS)
                     window_start, last_capture = monotonic(), None

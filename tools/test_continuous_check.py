@@ -187,10 +187,12 @@ def test_the_freeze_loop_reports_a_real_freeze():
                            time.monotonic())
 
     check("a real freeze produces a verdict", any("landed" in l for l in lines), lines)
-    # A stub cycling pre-frozen frames is frozen from the first grab, so the onset is at
-    # the press. The value is meaningless here; that a number is produced at all is not.
-    check("and a measured round trip alongside it",
-          any("round trip" in l for l in lines), lines)
+    # The round trip is derived from the fit the press was scheduled from, so with no fit
+    # there is nothing to derive it from and none is claimed. Silence is the correct
+    # behaviour here: a stub cycling pre-frozen frames has no sweep to measure against, and
+    # printing a latency for it would be inventing one.
+    check("but no round trip is invented without a fit",
+          not any("round trip" in l for l in lines), lines)
     print(f"        {monitor.grabs} grabs — {lines[-1].strip() if lines else '(silent)'}")
 
 

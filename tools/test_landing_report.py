@@ -160,6 +160,29 @@ def test_freeze_onset_times_the_moment_the_needle_stopped():
     check("too few reads yield no onset", freeze_onset([(0.0, 1.0), (0.025, 1.0)]) is None)
 
 
+def test_the_round_trip_comes_from_where_the_needle_stopped():
+    # Reproduces the armed check of 2026-08-15 22:48. Aimed 131.0, froze at 119.0 — 12 deg
+    # short at 326 deg/s, so the press took effect ~37 ms sooner than planned and the true
+    # round trip was ~88 ms, not the 130 it led by. The tail-read timing reported 409 ms for
+    # the same check, which the needle's own position rules out: at 409 ms it would have
+    # been near 222 deg. Deriving the round trip from the fit cannot drift that way.
+    from dbd.utils.needle_tracker import Fit, time_to_angle
+
+    fit = Fit(rate_deg_s=326.0, intercept=0.0, rms_deg=1.7, n=8)
+    press_ms = 100.0
+    settled = fit.angle_at(press_ms + 88.0)          # the freeze, 88 ms of round trip later
+    measured = time_to_angle(fit, settled % 360.0, press_ms)
+    check("round trip is read off the fit, not the tail reads",
+          abs((measured - press_ms) - 88.0) < 1.0, f"{measured - press_ms:.1f} ms")
+
+    # A counter-clockwise check must not read as a near-full revolution of latency.
+    ccw = Fit(rate_deg_s=-326.0, intercept=0.0, rms_deg=1.7, n=8)
+    settled = ccw.angle_at(press_ms + 88.0)
+    measured = time_to_angle(ccw, settled % 360.0, press_ms)
+    check("and the same holds counter-clockwise",
+          abs((measured - press_ms) - 88.0) < 1.0, f"{measured - press_ms:.1f} ms")
+
+
 def test_freeze_onset_agrees_with_freeze_angle():
     # The two must never disagree: a settled angle with no onset (or the reverse) would
     # print a round trip for a landing that was refused, or refuse one we had timed.
