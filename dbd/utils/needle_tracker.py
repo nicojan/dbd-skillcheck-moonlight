@@ -110,13 +110,14 @@ GREAT_FALLBACK_DEG = 10.5  # measured; the simulator's default of 15 is 40% too 
 # of the bias climbs fast, while the benefit against the -20 ms tail is largely bought by
 # the first degree (9 misses at 0 deg, 3 at 1.5).
 #
-# **Set to 0 on 2026-08-16, and this is a live test, not a settled number.** That sweep ran
-# against zero-jitter replays, where the only error is the one you dial in. The first real
-# match to record per-check landings says the empirical distribution is already late: mean
-# +1.92 deg over the 18 well-sampled gradeable fires, and three of the five failures were
-# late (+11.5, +10.5, +9.0) against two early (-8.0, -6.0). A bias that exists to buy
-# margin against early misses is being paid for on a distribution whose centre has drifted
-# past the far edge.
+# **Set to 0 on 2026-08-16, and VALIDATED over 33 armed fires the same evening.** That
+# sweep ran against zero-jitter replays, where the only error is the one you dial in. The
+# first real match to record per-check landings said the empirical distribution was already
+# late: mean +1.30 deg +/-0.95 over 23 gradeable fires. At 0, two further matches give mean
+# **-0.41 +/-0.88 over 33** — indistinguishable from centred — and 30/33 Great against
+# 18/23. The shift is -1.71 +/-1.29 against the -1.00 this change predicts: right
+# direction, right size. (The Great rate alone is NOT significant at these counts, p ~ 0.16;
+# it is the agreement with the predicted shift that carries the result.)
 #
 # It is NOT free, and the replays say so: at 0 the offline error centres (bias +1.3 -> +0.5
 # on the unhit set, worst 2.6 -> 1.6) but `recordings/check_009` stops firing at all —
@@ -126,7 +127,10 @@ GREAT_FALLBACK_DEG = 10.5  # measured; the simulator's default of 15 is 40% too 
 # quality are coupled, and one no-fire is worse than one good. 12 GREAT + 1 no fire against
 # a baseline of 13 GREAT is the price of this test.
 #
-# Restore 1.0 if a match at 0 shows early misses OR no-fires climbing.
+# That cost did NOT show up live: zero no-fires across the 33 fires at 0, including four
+# short fits that all still fired. The offline no-fire looks specific to check_009's
+# geometry rather than general. Restore 1.0 if a match shows early misses or no-fires
+# climbing — but on this evidence 0 is the better constant.
 AIM_BIAS_DEG = 0.0
 
 
