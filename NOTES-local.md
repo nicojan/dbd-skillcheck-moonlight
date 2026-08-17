@@ -23,7 +23,7 @@ Working: window targeting, focus gating, detection, key delivery through Moonlig
 
 **The two round-trip estimates never disagreed, and the link jitter is real** — settled on the bench 2026-08-16, see *The two latency estimates agree once the tail read is de-quantised*. True round trip is 46-98 ms, median 59, **sigma ~17 ms**, which is **5.6 deg** against a Great half-width of 5.25. That alone predicts ~66% Great, and the armed run returned 6 of 10. **The tracker is at its statistical ceiling and its own contribution is under 1 deg** — no amount of better fitting, frame rate or centre refinement can buy another Great. Only reducing link jitter can, which is Moonlight/host settings and the host-side input agent (next steps 1 and 8).
 
-**Whether a quarter of presses really never register is now in doubt** — the watch that reported it was reading stray red as needle. Fixed 2026-08-16; the next armed match answers it with recorded evidence rather than inference. See *The freeze watch was calling good landings lost presses*.
+**No presses are being lost. Settled 2026-08-16 20:43-20:55, and this closes the question the whole project was gated on.** One armed match, 32 predictive fires, **32 measured — zero unscored, zero `check cleared`, zero `still sweeping`.** Every press reached the game and every landing was read. The "quarter of presses never register" figure was entirely the old freeze watch reading stray red as needle; the fix removed it. **The host-side `SendInput` agent (next step 8) is therefore not justified by lost presses** — it stays deferred on evidence rather than on caution. The match scored **78% Great (18/23 gradeable), median error +0.5 deg, sigma 4.6**, against the ~66% the jitter model predicts. See *The freeze watch was calling good landings lost presses* and *A `full white` check scores GREAT no matter where it lands*.
 
 Not working: Merciless Storm (deliberate abstention), off-centre Doctor checks (outside the capture crop).
 
@@ -60,12 +60,14 @@ What changed in the code:
 
 Replayed frame by frame, with ground truth measured separately from the whole check:
 
-| set | checks | result | worst error |
-|-----|--------|--------|-------------|
-| `recordings_missed` | 15 | **15 Great** | 2.4 deg |
-| `recordings` | 13 | **13 Great** | 3.3 deg |
-| `recordings_video/oppression` (native 4K, 363 deg/s) | 1 | **Great** | 1.9 deg |
-| Merciless Storm, both clips | 29 | **abstains on all 29** | — |
+| set | checks | result (as first recorded) | **re-scored 2026-08-16** | worst error |
+|-----|--------|--------|--------|-------------|
+| `recordings_missed` | 15 | 15 Great | **12 Great, 2 ungraded, 1 no fire** | 1.6 deg |
+| `recordings` | 13 | 13 Great | **12 Great, 1 no fire** | 2.9 deg |
+| `recordings_video/oppression` (native 4K, 363 deg/s) | 1 | **Great** | — | 1.9 deg |
+| Merciless Storm, both clips | 29 | **abstains on all 29** | — | — |
+
+**The original column is not reproducible and should not be quoted.** Two separate causes, both found on 2026-08-16: the two `full white` checks in `recordings_missed` were never gradeable (their "Great band" measures 58-59 deg because the type draws the whole zone solid — they are hits, not Greats), and one check in each set now declines to fire at `AIM_BIAS_DEG = 0`. See the constant's comment for that trade.
 
 Live dry-run against a real match fired on two checks: +327 deg/s at 2.5 deg RMS over 32 frames, +352 at 2.1 over 17. The live loop gets *more* frames than the recordings do, so the fit is not frame-starved.
 
@@ -80,7 +82,7 @@ Live dry-run against a real match fired on two checks: +327 deg/s at 2.5 deg RMS
 
 **`measure_zone.py` on the hit set: no problem.** The handoff flagged this as unknown — frozen tails might have broken the median-over-frames assumption. They do not. The 13 repair-heal checks in `recordings` give Great 10.0-11.0, median **10.5**, matching `recordings_missed` exactly. The load-bearing constant now has two independent datasets under it.
 
-**What the tracker is sensitive to is the 72 ms round trip, not the frame rate.** Dropping two frames in three still scores 15 and 12 Greats. Mis-stating the latency by 10 ms drops the unhit set to 11 of 15; by 20 ms, to 2 of 15. Re-measure with `measure_latency.py` after any change to the network, the host or Moonlight's settings and pass `--round-trip-ms`. The two directions are not symmetric: Great is at the leading edge of the success zone, so firing late spills into Good while firing early misses the zone outright — hence `AIM_BIAS_DEG = 1.0`, which aims one degree late on purpose. The sweep behind that value is in the constant's comment.
+**What the tracker is sensitive to is the 72 ms round trip, not the frame rate.** Dropping two frames in three still scores 15 and 12 Greats. Mis-stating the latency by 10 ms drops the unhit set to 11 of 15; by 20 ms, to 2 of 15. Re-measure with `measure_latency.py` after any change to the network, the host or Moonlight's settings and pass `--round-trip-ms`. The two directions are not symmetric: Great is at the leading edge of the success zone, so firing late spills into Good while firing early misses the zone outright — hence `AIM_BIAS_DEG`, which aimed one degree late on purpose. **Set to 0 on 2026-08-16** — the first real match to record per-check landings came back a mean +1.9 deg *late*, so the bias was buying margin on the wrong side. The sweep behind the old value, and the no-fire it costs offline, are in the constant's comment.
 
 **2026-08-15 (later): the freeze-trim fix was ported to `analyse_needle.py`, and it moves published numbers.** `sweep_rates.py` imports the trim from there, so both tools move together — corrected figures below. Every change is in the same direction: the old numbers were inflated by frozen tails that the strict stall test let through.
 
@@ -224,6 +226,14 @@ All on the 2560x1080 ultrawide, Moonlight fullscreen, stream pillarboxed to 1920
 Capture cost is dominated by the syscall, not the pixel count. Shrinking the capture region cannot buy frame rate; widening it is nearly free.
 
 ## Findings worth not rediscovering
+
+**A `full white` check scores GREAT no matter where it lands, and it inflated every tally that included one (2026-08-16).** The type draws its whole success zone as one solid block, so `find_zone`'s fill run spans the zone and the "Great band" comes back 33-59 deg instead of 10-11. `score_freeze` then calls any landing inside the zone a Great — by construction, not by aim. In the first fully-logged armed match, 9 of 32 fires were `full white` and all 9 scored GREAT, pulling the reported rate from **78% to 84%**. `MIN_GREAT_DEG` had known about this since it was written — its comment says "(58 on full-white)" — but nothing acted on it downstream. Now guarded by `MAX_GREAT_DEG` plus a band-fills-its-own-zone ratio, and the verdict is `ungraded`: still fired, still counted as a hit, never counted as a Great. **The lesson is the reporting one — the tool printed a reassuring conclusion ("the link jitter is the ceiling, not the aim") that partly rested on nine checks it could not grade.**
+
+**`replay_tracker.py` had its own copy of the scoring rule, and that is why the fix nearly missed it.** The live path scores through `score_freeze`; the replay's `--human`/landing path reimplemented the same three-way comparison inline. Fixing the live scorer left the replay still calling `full white` a Great. It now calls `score_freeze`. **Check for a second copy whenever a scoring or geometry rule changes** — this project has already hit the same thing with the circular-run search in `measure_zone.py`.
+
+**Aim bias and fit quality are coupled, so `AIM_BIAS_DEG` is not a free dial (2026-08-16).** Moving it 1.0 -> 0 centres the offline error (unhit set bias +1.3 -> +0.5, worst 2.6 -> 1.6) but makes `recordings/check_009` stop firing entirely — "fit too poor (17.4 deg RMS)". An earlier target is an earlier deadline, so the tracker must commit a frame or two sooner, on a fit that has not settled, and the fit gate then refuses. **A no-fire is worse than a good**, so a bias sweep that only counts Greats among checks that fired will read the trade backwards.
+
+**Short fits are a real, separate loss, and the "prediction quality is pointless" conclusion does not cover them.** That conclusion was derived for *a 25-sample fit at 2 deg RMS*. In the first fully-logged match the gradeable fires split hard: **`fit_n` >= 15 gave 89% Great (16/18) at mean |err| 2.81 deg; `fit_n` < 15 gave 40% (2/5) at 4.90.** Both early failures were short fits, and the worst (-8.0, a MISS) fitted +349 deg/s against a session median of 326 — an overestimate fires early. All five short fits aimed at 127-161 deg, i.e. checks whose Great band sits early in the revolution, leaving little sweep to observe first; this is structural, not luck. **Not yet acted on — n=5, and two of the five are better explained by a stale frame and link jitter than by the fit.** A shrinkage prior toward the running session rate is the obvious candidate; get two or three more matches under it first.
 
 **The two latency estimates agree once the tail read is de-quantised (2026-08-16).** The handoff recorded them as contradictory: fit-derived 46-98 ms, tail read 79 +/- 2 over the same checks. **The tail read is quantised by the grab interval.** `report_landing` starts grabbing at key-down and grabs every ~25 ms — measured on the bench, `mss` on a 224 region is **24.4 ms** and `needle_angle` is **0.27 ms** — so the freeze can only be *seen* at the next multiple of that. Across all ten armed landings the tail read is 77, 77, 79, 79, 80, 80, 80, 80, 81 and one **103**: one bucket and its neighbour, not a link holding steady. Nine samples falling inside a 4 ms window out of 25 is about `3e-8` by chance, which is the tell. **It says only "somewhere in the bucket below 80", which is exactly consistent with 46-98.** The apparent precision was the instrument's, not the link's, and it argued for the wrong conclusion — that the scatter was ours and there was headroom in our own code.
 

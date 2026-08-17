@@ -63,6 +63,12 @@ MIN_GREAT_DEG = 6.0   # a real Great band measures 10-13 deg (58 on full-white);
                       # narrower is speckle. This is what keeps the tracker off Merciless
                       # Storm, which draws an unfilled outline with no solid band at all —
                       # its Great geometry is unmeasured, so a press there is a guess.
+MAX_GREAT_DEG = 20.0  # ...and the other end of that same fact. A `full white` check draws
+                      # the whole zone as one solid block, so the fill run spans it and the
+                      # band reads 33-59 deg. Firing there is fine — nine such fires on
+                      # 2026-08-16 all landed inside the zone — but SCORING there is not:
+                      # every one came back GREAT by construction and pulled the match
+                      # tally from 78% to 84%. Grade only a band we actually measured.
 CLOSE_DEG = 4.0       # bridge dropouts this short; antialiasing punches 1-2 deg holes
 
 # --- fitting and firing --------------------------------------------------------------
@@ -103,7 +109,25 @@ GREAT_FALLBACK_DEG = 10.5  # measured; the simulator's default of 15 is 40% too 
 # +10 ms of latency error, 0 deg keeps 14 Greats, 1.0 keeps 11, 2.0 keeps 6 — so the cost
 # of the bias climbs fast, while the benefit against the -20 ms tail is largely bought by
 # the first degree (9 misses at 0 deg, 3 at 1.5).
-AIM_BIAS_DEG = 1.0
+#
+# **Set to 0 on 2026-08-16, and this is a live test, not a settled number.** That sweep ran
+# against zero-jitter replays, where the only error is the one you dial in. The first real
+# match to record per-check landings says the empirical distribution is already late: mean
+# +1.92 deg over the 18 well-sampled gradeable fires, and three of the five failures were
+# late (+11.5, +10.5, +9.0) against two early (-8.0, -6.0). A bias that exists to buy
+# margin against early misses is being paid for on a distribution whose centre has drifted
+# past the far edge.
+#
+# It is NOT free, and the replays say so: at 0 the offline error centres (bias +1.3 -> +0.5
+# on the unhit set, worst 2.6 -> 1.6) but `recordings/check_009` stops firing at all —
+# "fit too poor (17.4 deg RMS)". An earlier target means an earlier deadline, so the
+# tracker must commit a frame or two sooner, on a fit that has not settled. That is the
+# same short-fit failure the live match showed, reached from the other side: aim and fit
+# quality are coupled, and one no-fire is worse than one good. 12 GREAT + 1 no fire against
+# a baseline of 13 GREAT is the price of this test.
+#
+# Restore 1.0 if a match at 0 shows early misses OR no-fires climbing.
+AIM_BIAS_DEG = 0.0
 
 
 @dataclass(frozen=True)
@@ -122,6 +146,23 @@ class Zone:
     @property
     def great_mid(self) -> float:
         return (self.great_start + self.great_width / 2.0) % 360.0
+
+    @property
+    def zone_width(self) -> float:
+        return (self.zone_end - self.zone_start) % 360.0
+
+    @property
+    def great_measured(self) -> bool:
+        """Did we find a Great band, or just the whole zone lit?
+
+        Two independent tells, because either alone can be fooled: an absolute width no
+        real band reaches, and a band filling its own zone. A graded check sits at
+        10-11 deg inside a 49 deg zone; the `full white` degenerate case sits at 33-59
+        inside 33-60, a ratio of ~1.0 that no drawn check has.
+        """
+
+        return (self.great_width <= MAX_GREAT_DEG
+                and self.great_width < 0.9 * self.zone_width)
 
 
 @dataclass(frozen=True)
@@ -647,9 +688,15 @@ def score_freeze(zone, freeze_deg):
 
     if zone is None or freeze_deg is None:
         return "unknown", None
-    if (freeze_deg - zone.great_start) % 360.0 <= zone.great_width:
+    in_zone = (freeze_deg - zone.zone_start) % 360.0 <= zone.zone_width
+    if not zone.great_measured:
+        # The press landed, and we can say whether it landed in the zone — but the Great
+        # band was never measured on this check, so calling it Great would be inventing
+        # the result. `ungraded` keeps it out of the tally and in the error spread.
+        verdict = "ungraded" if in_zone else "MISS"
+    elif (freeze_deg - zone.great_start) % 360.0 <= zone.great_width:
         verdict = "GREAT"
-    elif (freeze_deg - zone.zone_start) % 360.0 <= (zone.zone_end - zone.zone_start) % 360.0:
+    elif in_zone:
         verdict = "good"
     else:
         verdict = "MISS"

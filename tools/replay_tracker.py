@@ -159,17 +159,10 @@ def score(decision, truth_fit, zone, round_trip_ms):
     lands_ms = decision.press_at_ms + round_trip_ms
     lands_deg = truth_fit.angle_at(lands_ms) % 360.0
 
-    into_great = (lands_deg - zone.great_start) % 360.0
-    into_zone = (lands_deg - zone.zone_start) % 360.0
-    zone_width = (zone.zone_end - zone.zone_start) % 360.0
-    err = (lands_deg - zone.great_mid + 540.0) % 360.0 - 180.0
-
-    if into_great <= zone.great_width:
-        verdict = "GREAT"
-    elif into_zone <= zone_width:
-        verdict = "good"
-    else:
-        verdict = "MISS"
+    # Scored by the same function the live path uses, not a copy of it. The copy that used
+    # to live here is exactly why `full white` kept scoring GREAT off a 58 deg band after
+    # the live scorer had stopped doing so.
+    verdict, err = score_freeze(zone, lands_deg)
 
     return {
         "verdict": verdict,
@@ -293,11 +286,16 @@ def main():
     goods = [s for s in scored if s[1] == "good"]
     misses = [s for s in scored if s[1] == "MISS"]
     nofire = [s for s in scored if s[1] in ("NO FIRE", "UNSCORED")]
+    ungraded = [s for s in scored if s[1] == "ungraded"]
     errs = np.array([s[2]["err_deg"] for s in scored if s[2]])
 
     print(f"\n{len(scored)} sweeping checks scored against pixel-measured zones:")
     print(f"  GREAT {len(greats)}   good {len(goods)}   MISS {len(misses)}   "
-          f"no fire {len(nofire)}")
+          f"no fire {len(nofire)}"
+          + (f"   ungraded {len(ungraded)}" if ungraded else ""))
+    if ungraded:
+        print(f"  ({len(ungraded)} landed but drew no measurable Great band — full white; "
+              "they are hits, not Greats)")
     if len(errs):
         print(f"  landing error vs Great centre: median {np.median(np.abs(errs)):.1f} deg, "
               f"bias {errs.mean():+.1f} deg, worst {np.abs(errs).max():.1f} deg")

@@ -290,7 +290,11 @@ def summarise_landings(landings):
     trips = [l.round_trip_ms for l in read]
     errors = [l.error_deg for l in landings if l.error_deg is not None]
 
-    tally = ", ".join(f"{v} {verdicts.count(v)}" for v in ("GREAT", "good", "MISS")
+    # `ungraded` must be in this list, not just in the count: a full-white check has no
+    # measurable Great band, so it is scored as a hit but never as a Great. Leaving it out
+    # made the header claim more fires than the tally accounted for.
+    tally = ", ".join(f"{v} {verdicts.count(v)}"
+                      for v in ("GREAT", "good", "MISS", "ungraded")
                       if verdicts.count(v))
     lines = [f"landings: {len(verdicts)} of {len(landings)} fires scored"
              + (f" — {tally}" if tally else "")]

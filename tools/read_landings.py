@@ -74,11 +74,36 @@ def tally(values):
     return ", ".join(f"{k} {counts[k]}" for k in sorted(counts, key=lambda k: -counts[k]))
 
 
+MAX_GREAT_DEG = 20.0  # kept in step with needle_tracker.MAX_GREAT_DEG
+
+
+def gradeable(record):
+    """Was this fire's Great band actually measured, or was the whole zone lit?
+
+    Read from the recorded zone rather than the verdict, so logs written BEFORE the
+    2026-08-16 fix are re-judged honestly instead of being taken at their word. A
+    `full white` check draws one solid block: its band reads 33-59 deg and fills its own
+    zone, so every landing inside scored GREAT and the tally flattered itself.
+    """
+
+    zone = record.get("zone")
+    if not zone:
+        return True
+    great = (zone["great_end"] - zone["great_start"]) % 360.0
+    span = (zone["zone_end"] - zone["zone_start"]) % 360.0
+    return great <= MAX_GREAT_DEG and great < 0.9 * span
+
+
 def summarise(records):
     """Lines describing a set of fires. Pure, so the arithmetic can be tested."""
 
     if not records:
         return ["no fires recorded"]
+
+    ungraded = [r for r in records if not gradeable(r)]
+    records = [r for r in records if gradeable(r)]
+    if not records:
+        return [f"{len(ungraded)} fires, none with a measured Great band — nothing to grade"]
 
     verdicts = [r["verdict"] for r in records if r.get("verdict")]
     errors = [r["error_deg"] for r in records if r.get("error_deg") is not None]
@@ -115,6 +140,15 @@ def summarise(records):
     leads = [r["lead_ms"] for r in records if r.get("lead_ms") is not None]
     if leads:
         lines.append(f"  lead used: {leads[0]:.0f} -> {leads[-1]:.0f} ms")
+
+    if ungraded:
+        kinds = tally(r.get("desc", "?") for r in ungraded)
+        landed = [r["error_deg"] for r in ungraded if r.get("error_deg") is not None]
+        lines.append(f"  + {len(ungraded)} fires excluded — no measurable Great band "
+                     f"({kinds}); they pressed and "
+                     + (f"{sum(1 for r in ungraded if r.get('verdict') != 'MISS')} landed "
+                        f"in the zone" if landed else "were not read")
+                     + ", but the band is unmeasured so they cannot be graded")
 
     unscored = [r for r in records if not r.get("verdict")]
     if unscored:

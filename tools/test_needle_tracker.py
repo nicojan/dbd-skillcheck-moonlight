@@ -188,6 +188,33 @@ def test_score_freeze():
           score_freeze(wrapped, 2.0)[0] == "GREAT", score_freeze(wrapped, 2.0))
 
 
+def test_a_full_white_zone_is_not_graded():
+    """A `full white` check reads as one solid block, so the Great run fills the zone.
+
+    Nine such fires on 2026-08-16 all scored GREAT against a 33-59 deg "Great band" —
+    every landing inside the zone was a Great by construction, which flattered the match
+    tally from 78% to 84%. The band is unmeasured on this type, so it must not be graded.
+    """
+
+    solid = Zone(great_start=100.0, great_end=159.0, zone_start=100.0, zone_end=160.0)
+    check("a real Great band is gradeable",
+          Zone(great_start=100.0, great_end=110.0, zone_start=100.0,
+               zone_end=150.0).great_measured)
+    check("a zone-wide Great band is not", not solid.great_measured,
+          f"great_width={solid.great_width}")
+    check("a landing inside an ungraded zone is not called GREAT",
+          score_freeze(solid, 130.0)[0] == "ungraded", score_freeze(solid, 130.0))
+    check("a landing outside it is still a MISS",
+          score_freeze(solid, 300.0)[0] == "MISS", score_freeze(solid, 300.0))
+    check("the error is still reported, for the spread",
+          score_freeze(solid, 130.0)[1] is not None)
+
+    # Hyperfocus SHRINKS the Great band, so narrow-but-real must keep grading.
+    narrow = Zone(great_start=100.0, great_end=106.5, zone_start=100.0, zone_end=150.0)
+    check("a shrunken Hyperfocus band is still graded", narrow.great_measured,
+          f"great_width={narrow.great_width}")
+
+
 def watch_readings(spec, dt_ms=25.0, t0=0.0):
     """(angle, strength) pairs on a fixed cadence, as the freeze watch collects them."""
 
