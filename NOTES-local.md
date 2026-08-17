@@ -46,13 +46,13 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 ## Resume here
 
-Read this section first; it is the state as of 2026-08-16.
+Read this section first; it is the state as of 2026-08-17.
 
 **2026-08-16: the error budget is now closed, and three of its four terms are removed.** No new play was needed for any of this — it came out of the nine armed logs, the code, and two bench measurements.
 
 | term | size | status |
 |------|------|--------|
-| link jitter | **11 ms / 3.7 deg**, plus rare multi-hundred-ms stalls | irreducible from this side; the whole remaining problem |
+| link jitter | **11 ms / 3.7 deg**, plus rare multi-hundred-ms stalls | the whole remaining problem; **which Moonlight leg it sits in is open** and decides step 8 |
 | fit + extrapolation | **< 1 deg** | already solved; do not spend more here |
 | `sleep()` overshoot | 2-5 ms / ~1 deg | **fixed** — `_wait_until` halves the gap then spins |
 | constant lead error | ~5 ms | **fixed** — the lead now follows the measured round trip |
