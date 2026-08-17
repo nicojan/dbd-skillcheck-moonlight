@@ -129,9 +129,27 @@ GREAT_FALLBACK_DEG = 10.5  # measured; the simulator's default of 15 is 40% too 
 #
 # That cost did NOT show up live: zero no-fires across the 33 fires at 0, including four
 # short fits that all still fired. The offline no-fire looks specific to check_009's
-# geometry rather than general. Restore 1.0 if a match shows early misses or no-fires
-# climbing — but on this evidence 0 is the better constant.
-AIM_BIAS_DEG = 0.0
+# geometry rather than general.
+#
+# **Back to 1.0 on 2026-08-17, on 136 pooled armed fires — and the point is that the
+# optimum is a plateau, not a value.** Bias only translates the landing distribution, so
+# every value can be re-scored against the four matches' measured errors without playing
+# again. 0.0 and +1.0 give the *same* tally, 117 Great (86%) and 4 MISS; +1.5 trades two
+# Greats for one miss, -1.0 trades three Greats for eight misses. The 33-fire sample that
+# argued for 0 was never able to separate 0 from 1.0, and this one says they are equal on
+# the two outcomes that matter.
+#
+# 1.0 wins the tie on the two things the tally cannot see. First, the asymmetry is now
+# measured rather than argued from replays: the Great band sits a median 1.0 deg from the
+# leading edge of the success zone and 38.0 deg from the trailing edge, and all four misses
+# in 136 fires are EARLY (-7.5 to -9.5 deg). Nothing has ever missed late. Second, a later
+# target is a later deadline, which is the no-fire risk the paragraph above describes; 1.0
+# relieves it instead of spending it. Same Great rate, margin on both failure modes.
+#
+# Do not re-sweep this against replays. Replay error is ~1.0 deg sigma against 3.8 live, so
+# a replay sweep is measuring the wrong distribution — that is how the value got moved on
+# thin evidence twice. Re-score the `.jsonl` landings instead.
+AIM_BIAS_DEG = 1.0
 
 
 @dataclass(frozen=True)
