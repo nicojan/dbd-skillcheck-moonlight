@@ -8,17 +8,19 @@ It began as a measurement rig, because the reason repair and heal checks never l
 
 ## Status
 
-Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks — verified armed, in a real match**: 5 Great, 1 good, 0 miss across six scored landings on 2026-08-15.
+Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks — verified armed, over three real matches on 2026-08-16**: 56 gradeable fires, **48 Great (86%)**, 2 miss, and every press accounted for.
 
-Still losing about a quarter of presses, which never reach the game at all (`still sweeping`). That is the largest remaining loss and it is a delivery problem, not a timing one.
+**No presses are being lost.** An earlier version of this section claimed about a quarter never reached the game. That was wrong, and it was our own instrument: the freeze watch judged the tail of everything it saw against an absolute brightness floor, while the stray red left behind by a cleared check clears that floor. A landing that froze and then cleared inside the watch window therefore reported `still sweeping` — the same line a genuinely lost press produces. Once the watch was fixed to judge the contiguous lit block against the check's own peak, **32 of 32 fires in the next match produced a readable landing**, and 33 more since. There was never a delivery problem.
 
-Not handled: Merciless Storm, where the tracker deliberately abstains. Off-centre Doctor checks are still outside the capture crop.
+**The remaining loss is link jitter, and it is not ours to fix.** Round trip over 56 armed fires runs 39-120 ms against a median of 56, which is about 3.7 degrees of scatter at the needle — against a Great half-band of 5.25. That alone sets the ceiling near 90%, which is roughly where it lands. The fit contributes under a degree, so better prediction cannot buy another Great; only a quieter link can.
 
-We measured the Great zone off the drawn pixels of 13 deliberately missed checks. It is **10.5 degrees wide**, and the same measurement on the 13 hit checks agrees to within half a degree. At our median sweep rate of 320 deg/s the needle crosses that band in 33 ms, and across every rate we have recorded, up to the 406 deg/s ceiling Hyperfocus can reach, the window runs 26 to 37 ms. Our keypress-to-pixel round trip is **72 ms**, median of six trials that spanned 8 ms.
+Not handled: Merciless Storm, where the tracker deliberately abstains. Off-centre Doctor checks are still outside the capture crop. `full white` checks are fired at but **not graded** — that type draws its whole success zone as one solid block, so there is no Great band to measure and any landing inside would score Great by construction.
+
+We measured the Great zone off the drawn pixels of 13 deliberately missed checks. It is **10.5 degrees wide**, and the same measurement on the 13 hit checks agrees to within half a degree. At our median sweep rate of 320 deg/s the needle crosses that band in 33 ms, and across every rate we have recorded, up to the 406 deg/s ceiling Hyperfocus can reach, the window runs 26 to 37 ms. Our keypress-to-pixel round trip is **about 56 ms**, median over 56 armed fires, ranging 39 to 120.
 
 The needle has therefore left the zone before the key arrives. No setting recovers those milliseconds. Upstream ships a delay dial (the hit-ante option). Raising it made results worse, which is how we learned that the Great band hugs the *leading* edge of the success zone. The dial was already at the end of its travel.
 
-So the bot no longer presses when it sees a Great. It locates the ring, reads the Great band out of the drawn pixels, fits the sweep as a straight line, and schedules the key so the needle *arrives* in the band 72 ms later. `dbd/utils/needle_tracker.py` is the whole of it.
+So the bot no longer presses when it sees a Great. It locates the ring, reads the Great band out of the drawn pixels, fits the sweep as a straight line, and schedules the key so the needle *arrives* in the band a round trip later. `dbd/utils/needle_tracker.py` is the whole of it.
 
 ### What it scores
 
@@ -26,12 +28,14 @@ So the bot no longer presses when it sees a Great. It locates the ring, reads th
 
 | set | checks | result | worst error |
 |---|---|---|---|
-| `recordings_missed` (unhit) | 15 | 15 Great | 2.4 deg |
-| `recordings` (hit) | 13 | 13 Great | 3.3 deg |
+| `recordings_missed` (unhit) | 15 | 12 Great, 2 ungraded, 1 no fire | 1.6 deg |
+| `recordings` (hit) | 13 | 12 Great, 1 no fire | 2.9 deg |
 | `oppression.mp4` (native 4K, 363 deg/s) | 1 | 1 Great | 1.9 deg |
 | Merciless Storm, two clips | 29 | abstains on all 29 | — |
 
-The Great band is ±5.25 deg about its centre, so that is the error budget. Drop two frames in three and it still scores 15 and 12; the approach is not short of frames.
+The Great band is ±5.25 deg about its centre, so that is the error budget. Drop two frames in three and it barely moves; the approach is not short of frames.
+
+An earlier version of this table read 15/15 and 13/13. **Neither number is reproducible, for two separate reasons, and both are worth stating rather than quietly restating.** The two `ungraded` entries are `full white` checks that were never gradeable — that type draws its zone as one solid block, so the measured "Great band" comes back 58 degrees and every landing inside it scored Great automatically. The two `no fire` entries appeared when the aim bias was removed (see below): an earlier target is an earlier deadline, so on those two checks the tracker has to commit before its fit has settled, and the fit-quality gate declines. That trade was accepted deliberately — it costs two checks offline and, across 33 armed fires, cost none.
 
 For scale, the same code can grade the *player's* presses, because a hit freezes the needle and that frozen angle is where the press landed:
 
@@ -41,7 +45,11 @@ For scale, the same code can grade the *player's* presses, because a hit freezes
 
 Ten scorable human presses: **4 Great, 6 good, and every single one late**, median 9.0 deg past the centre of the band. That is the arriving-late diagnosis measured directly, without reference to any latency figure.
 
-What it *is* sensitive to is the 72 ms constant. Mis-state it by 10 ms and Greats fall to 11 of 15; by 20 ms and they fall to 2. Re-run `tools/measure_latency.py` after any change to the network path, the host, or Moonlight's settings, and pass the result as `--round-trip-ms`. The two directions are not symmetric — Great sits at the leading edge of the success zone, so firing late spills into Good while firing early misses the zone entirely — so the aim sits one degree late by design.
+What it *is* sensitive to is the round-trip constant. Mis-state it by 10 ms and Greats fall to 11 of 15; by 20 ms and they fall to 2. The default is now **60 ms**, and the armed loop measures its own round trip per check and adapts the lead toward it, so the constant matters mainly at the start of a session.
+
+**Do not trust `measure_latency.py` over the armed number.** It presses at a text field on the host, in its own process, with the detector not running — it reported 126.5 ms on the same evening the armed loop was landing at 59. Every predictive fire logs `round trip NNN ms measured`, which is the closed-loop figure under real load against the game itself. Prefer it whenever the two disagree.
+
+The two directions of error are not symmetric — Great sits at the leading edge of the success zone, so firing late spills into Good while firing early misses the zone entirely. The aim therefore used to sit one degree late on purpose. **It no longer does**: that bias was swept against zero-jitter replays, and the first match to record per-check landings came back a mean +1.3 degrees *late* already, so the margin was being bought on the side that was not failing. At zero the aim is centred — mean landing error **−0.41 deg ±0.88 over 33 fires**, against +1.30 ±0.95 before.
 
 ## What differs from upstream
 
@@ -85,7 +93,25 @@ Start Moonlight and make it fullscreen. Then:
 .venv/bin/python tools/autorun.py --no-predict     # upstream's reactive behaviour
 ```
 
-Every predictive shot logs the fitted rate, the fit residual, the frame count behind it, and the angle it aimed at. It then reads where the needle froze and grades itself Great, good or miss on the spot, so accuracy is a measurement rather than an inference from the end-of-match tally.
+Every predictive shot logs the fitted rate, the fit residual, the frame count behind it, and the angle it aimed at. It then reads where the needle froze and grades itself Great, good or miss on the spot, so accuracy is a measurement rather than an inference from the end-of-match tally. Each fire is also written to `landings-<timestamp>.jsonl` with its raw readings; read a match back with:
+
+```bash
+.venv/bin/python tools/read_landings.py landings-20260816-214940.jsonl
+```
+
+**A shell shortcut, if you run this often.** Drop this in `~/.zshrc` — it starts the stream, waits for it to settle, then runs the bot in the foreground of that terminal, which is where the Accessibility grant lives:
+
+```zsh
+dbd() {
+  local repo="$HOME/dev/dbd_autoSkillCheck"
+  pgrep -qx Moonlight || { nohup moonlight stream <host> "<app>" >/dev/null 2>&1 & disown; }
+  sleep "${DBD_WAIT:-30}"
+  cd "$repo" || return 1
+  .venv/bin/python tools/autorun.py "$@" 2>&1 | tee "armed-$(date +%H%M).log"
+}
+```
+
+Foreground and *that* terminal both matter: a detached or backgrounded run injects nothing and reports no error. Do not add `--pin-geometry` here — startup resolves before Moonlight is fullscreen, and the resume path self-corrects.
 
 Pin the geometry if the window has ever moved mid-session. Moonlight registers about sixteen windows, one of them a 1280x628 decoy that clears the size floor, and a refresh firing mid Space-transition once latched a menu-bar-inset window that gave a 218 pixel crop instead of 224.
 
@@ -93,13 +119,7 @@ Pin the geometry if the window has ever moved mid-session. Moonlight registers a
 
 Everything above is verified offline and in dry-run. The one claim no amount of replay can settle is whether a self-reported `GREAT` matches what the game actually awarded, and that needs an armed match. Private games only — see the warning below.
 
-**Before starting.** Re-measure the latency, because it is the one input the whole thing is sensitive to and it moves with the network, the host and Moonlight's settings:
-
-```bash
-.venv/bin/python tools/measure_latency.py
-```
-
-If the median is not close to 72 ms, pass the real figure as `--round-trip-ms`. A 10 ms error costs about a quarter of the Greats; 20 ms costs nearly all of them.
+**Before starting.** The lead now adapts to the round trip the loop measures for itself, so there is no longer a calibration step to run first. `measure_latency.py` still exists, but treat it as a rough sanity check rather than the number to pass — it measures an idle process against a host text field, and has been wrong by a factor of two against the armed loop. If you do want to seed the starting lead, pass `--round-trip-ms`; it will drift toward the truth within a few checks anyway.
 
 Then confirm the framing is right before arming, and keep the log:
 
@@ -117,9 +137,9 @@ FIRE predictive: repair-heal (out) — +327 deg/s, fit 2.5 deg RMS over 32 frame
   landed 301.4 deg — GREAT, +1.4 deg from Great centre
 ```
 
-The class on the first line is normally `(out)`, not `(great)`. That is the design working: it commits about 72 ms before the needle reaches the band, while the model still calls it out.
+The class on the first line is normally `(out)`, not `(great)`. That is the design working: it commits a full round trip before the needle reaches the band, while the model still calls it out.
 
-**What to compare.** The bot's verdict against the game's own feedback, check by check. The offline replay says 29/29 Great; a shortfall made up of `good` verdicts means the latency figure is wrong, and the *direction* says which way — a positive error means it is arriving late, so the true round trip is longer than the number it was given. A shortfall made up of *misses*, or of checks with no readable landing at all, is a different failure and is not about latency: see "When nothing lands at all" below.
+**What to compare.** The bot's verdict against the game's own feedback, check by check. The offline replay scores 24 Great with nothing worse than a no-fire; a shortfall made up of `good` verdicts means the latency figure is wrong, and the *direction* says which way — a positive error means it is arriving late, so the true round trip is longer than the number it was given. A shortfall made up of *misses*, or of checks with no readable landing at all, is a different failure and is not about latency: see "When nothing lands at all" below.
 
 **When to stop and re-measure rather than push on:**
 
@@ -139,20 +159,19 @@ The class on the first line is normally `(out)`, not `(great)`. That is the desi
 
 **The bug this ladder was built to find, for the record.** `fire()` took its wait in *seconds* while the predictive call site passed `decision.press_at_ms - now_ms` in *milliseconds*. Every predictive press therefore slept 1000x too long — a 20 ms lead became 20 seconds. It survived four armed matches because nothing else could see it: `--dry-run` returns before the sleep, the offline replay never sleeps, the reactive path passes 0, and the symptom it produced armed was `needle gone before it could be read`, which reads like a *detection* fault. The one check that ever produced a landing was the one whose remaining lead happened to be a fraction of a millisecond. `fire()` now takes milliseconds, says so in the parameter name, and `test_landing_report.py` pins the unit.
 
-Read this twice: EAC can treat injected input as an unfair advantage, and accounts get banned for it. Upstream restricts the tool to private games. This fork does nothing to improve those odds.
-
 Upstream's Gradio web UI still runs through `python app.py`, with a `moonlight` capture backend added.
 
 Read this twice: EAC can treat injected input as an unfair advantage, and accounts get banned for it. Upstream restricts the tool to private games. This fork does nothing to improve those odds.
 
 ## Tools
 
-Seventeen small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
+Eighteen small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
 
 | Tool | What it does |
 |---|---|
 | `autorun.py` | the detect and fire loop, focus-gated, predictive |
 | `replay_tracker.py` | runs the tracker over recorded checks and scores where each press lands |
+| `read_landings.py` | reads a match's `landings-*.jsonl` back: Great rate, landing bias and spread, round trip, and the raw readings behind any fire that produced no verdict |
 | `test_needle_tracker.py` | unit tests for the tracker's logic, including the reversed-check path |
 | `test_landing_report.py` | tests the armed-only self-scoring path, which no dry-run reaches |
 | `test_continuous_check.py` | replays a 21 s Merciless Storm check unbroken; covers the buffer caps and the freeze loop |
@@ -180,7 +199,7 @@ Numbers are from a 2560x1080 ultrawide, Moonlight fullscreen, the stream pillarb
 | Capture (`mss`) | 21.9 ms per frame, about 90% of the frame budget |
 | Inference | 2.0 to 2.5 ms per frame |
 | Live throughput | 34 fps (upstream targets 120) |
-| Keypress to pixel | 72 ms median |
+| Keypress to pixel | **56 ms median** armed (39-120, sigma 12-15); an idle standalone measurement of the same thing said 126.5 and was wrong |
 | Capture cost, 224 px vs full frame | 22.2 ms vs 26.9 ms, so 4.7 ms buys 41 times the pixels |
 | Needle sweep rate | 294 to 328 deg/s, median 325 (standard play); 214 to 440 on a faster build |
 | Angle fit residual | 1.9 to 2.8 deg RMS on our captures, 0.44 to 2.7 on native 60 fps footage |
