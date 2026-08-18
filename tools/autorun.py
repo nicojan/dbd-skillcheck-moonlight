@@ -109,7 +109,7 @@ SPIN_MS = 3.0
 RESUME_SETTLE_SECONDS = 0.75
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Focus-gated skill check detector")
     p.add_argument("--window", default="Moonlight", help="substring of the window owner/title")
     p.add_argument("--model", default="models/model.onnx")
@@ -131,7 +131,7 @@ def parse_args():
                    help="gate on focus alone, skipping the window-list confirmation")
     p.add_argument("--pin-geometry", action="store_true",
                    help="lock the startup capture region instead of re-resolving on resume")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def parse_aspect(text):

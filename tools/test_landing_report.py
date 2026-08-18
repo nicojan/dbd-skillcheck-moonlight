@@ -563,6 +563,71 @@ def replace_fired(tracker):
     return replace(tracker, fired_at_ms=120.0)
 
 
+def test_the_loop_actually_prints_the_no_press_line():
+    """The unit above proves the sentence; this proves the loop ever reaches it.
+
+    The wiring is where this project's silent failures live — a helper that is correct and
+    never called looks exactly like a match in which nothing was dropped. So the real
+    `run` loop is driven here against stub capture, stub focus and a scripted classifier:
+    four frames of a tracked check, then three check-free frames, which is the drop rule.
+    """
+    # `capture_log` above is how the rest of this file reads the loop's output: it
+    # replaces `autorun.log`, which is also why capturing stdout here would come back
+    # empty when the whole file runs.
+    autorun, printed = capture_log()
+
+    class StubWatcher:
+        last_frontmost = "Moonlight"
+        def is_active(self):
+            return True
+
+    class StubWindow:
+        region = {"left": 0, "top": 0, "width": 224, "height": 224}
+        def describe(self):
+            return "stub"
+        def refresh(self):
+            pass
+
+    # Four tracked frames — too few for `decide` to schedule anything — then check-free
+    # frames until TRACK_DROP_FRAMES bites, then stop the loop.
+    script = [(1, "repair-heal (out)", False)] * 4 + [(0, "none", False)] * 4
+
+    class StubModel:
+        def __init__(self, **kw):
+            self.calls = 0
+        def check_provider(self):
+            return "stub"
+        def grab_screenshot(self):
+            return np.zeros((224, 224, 3), dtype=np.uint8)
+        def predict(self, frame):
+            if self.calls >= len(script):
+                raise KeyboardInterrupt
+            pred, desc, hit = script[self.calls]
+            self.calls += 1
+            return pred, desc, {desc: 1.0}, hit
+        def cleanup(self):
+            pass
+
+    saved = (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher, autorun.sleep)
+    autorun.AI_model = StubModel
+    autorun.Monitoring_window = lambda **kw: StubWindow()
+    autorun.FocusWatcher = lambda **kw: StubWatcher()
+    autorun.sleep = lambda _s: None
+    try:
+        autorun.run(autorun.parse_args(["--dry-run", "--no-landing-log"]))
+    finally:
+        (autorun.AI_model, autorun.Monitoring_window,
+         autorun.FocusWatcher, autorun.sleep) = saved
+    printed = "\n".join(printed)
+
+    check("a dropped check prints a NO PRESS line from the live loop",
+          "NO PRESS" in printed, printed[-400:])
+    check("...naming the check and the reason",
+          "repair-heal (out)" in printed and "samples" in printed, printed[-400:])
+    check("...and the exit summary tallies it",
+          "no press: 1 tracked checks" in printed, printed[-400:])
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
