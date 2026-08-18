@@ -48,6 +48,40 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 Read this section first; it is the state as of 2026-08-17.
 
+**2026-08-17 (evening): the instrument was measuring precision and calling it accuracy, and that is now fixed.** Two matches (`landings-20260817-181754.jsonl`, 28 fires — 21 Great, 5 good, 2 MISS; then `landings-20260817-185256.jsonl`, still running when this was written — 21 fires, 18 Great, 2 good, 1 MISS). Pooled across all seven armed logs the record is **202 gradeable fires, 170 Great (84%), 24 good, 8 MISS**. But the operator reported missing more checks than either log accounts for, and that was right: **the log could only ever count checks the bot fired on.**
+
+**A tracked check that never gets a press wrote nothing at all.** `decide` has three outcomes that schedule no press *and* leave `may_react` false — too few samples, a fit that never came under the RMS gate, a rate outside the plausible band. All three fell straight out of the loop in silence, so a match that lost six checks logged identically to one that saw six. Every diagnosis in these notes up to today was therefore made off fires that *did* happen, which is survivorship bias baked into the instrument. `no_press_note` now writes one line per dropped check with the reason, the sample count, the track duration, the fit and the zone, and the exit summary tallies the reasons with their digits stripped so they group:
+
+```
+NO PRESS: repair-heal (out) — only 4 samples; 4 samples over 108 ms, no zone found
+  no press: 3 tracked checks never got one — 2 only N samples, 1 fit too poor (N deg RMS)
+```
+
+It is tested twice on purpose. The sentence is a pure-function unit test; the *wiring* is driven through the real `run` loop against stub capture, focus and classifier, because a helper that is correct and never called looks exactly like a match in which nothing was dropped — which is the failure this project keeps producing. **Still unverified in the wild**: the run after the restart printed **no `NO PRESS` lines at all across 21 fires**. Taken with the operator's report that checks were being missed, the reading that fits both is that the lost checks are ones the classifier never labelled — the invisible class below — rather than tracked checks the tracker gave up on. But it does not distinguish that from a silent code path, and the loop-level test is the only evidence the path runs. Watch for the line on the next match before trusting either reading.
+
+**The limit of this, stated plainly.** It catches checks the classifier *saw* and the tracker then gave up on. A check the model never labels at all is still invisible, and no logging change can fix that without ground truth.
+
+**Short tracks are where the misses live, and it is the strongest lead now open.** Splitting all 181 landings by how many frames the fit had, with the two corrupt-zone outliers removed:
+
+| track length | n | sigma | Great | MISS |
+|---|---|---|---|---|
+| <= 15 frames | 37 | 4.81 deg | 70% | 4 |
+| 16-25 frames | 80 | 4.41 deg | 79% | 0 |
+| > 25 frames | 72 | **3.66 deg** | 81% | 1 |
+
+Monotone, and four of the five non-corrupt misses sit in the short bucket. At the ~37 fps the loop actually captures at, a full sweep is ~40 frames, so an 11-frame fit means tracking began roughly **700 ms into the check**. A short track and a no-press are the same event at two severities — the check was picked up late, and how late decides whether it costs a bad fit or the whole press. **This is a detection-latency question, not an aim question**, and it is where the next work belongs.
+
+**One of the two misses was a corrupt zone read, not a mistimed press.** At 18:24:07 the zone came back as `328 -> 58 deg`, a **90 deg span** against a median of 49 and a maximum of 60 over all 181 recorded checks. A Great band was placed at 3-14 inside that phantom span, the bot aimed at 9.5, and the needle stopped at 323.5 — *before* the zone even starts. `MIN/MAX_GREAT_DEG` sanity-checks the Great band; **nothing checks the width of the whole zone.** A `MAX_ZONE_DEG` of about 65 would have rejected it and dropped the check to the reactive fallback, which is strictly better than aiming at fiction. **Deliberately not implemented on 2026-08-17** — one data point, and this project has a history of tuning constants on thin evidence.
+
+**`round trip ... IMPLAUSIBLE` does not mean the link stalled.** The number is derived from where the needle stopped, wrapped forward, so a landing *behind* the target reads as most of a revolution of waiting. Both records that ever produced it have entirely normal 76-80 ms tail reads. Read that line as "landed before the zone", never as "the link hung".
+
+**`AIM_BIAS_DEG` re-confirmed at 1.0, this time over 161 landings.** Re-scoring the real logs (not replays) against a shifted target: 1.0 gives 135 Great / 7 fail, 1.5 gives 134 / 6, 2.0 gives 130 / 5, and the `great_width / 4` cap gives 125 / 5. Buying two fewer misses costs ten Greats. Leave it. The reason every miss is early is structural and worth stating once: **`great_start == zone_start` in all 181 records** — the Great band is flush against the leading edge of the success zone, so there is no early margin by construction, while overshoot degrades gracefully into Good.
+
+**The `dbd` launcher does three legs now** (macOS side, `~/.zshrc`, not in this repo): stream Big Picture from the host, then launch the game on the host over ssh, then run the bot. The old version guarded the stream behind `pgrep -qx Moonlight`, which meant that any already-open Moonlight window — including a plain GUI one — made it skip the stream entirely and simply sit there. A second `moonlight stream` invocation hands off to the running instance rather than opening a duplicate, so the guard was never needed. The game leg is `setsid steam "steam://rungameid/381210"` over ssh with `DISPLAY`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` and the mutter Xwayland `XAUTHORITY` exported — Sunshine exposes no app entry for the game, so it cannot be streamed directly. See the README for the current function.
+
+**Still open and unchanged: the 120 fps experiment.** Neither evening match was run with the host game deliberately set to 120, so the largest identified jitter term is still untested. It stays the cheapest experiment available.
+
+
 **2026-08-16: the error budget is now closed, and three of its four terms are removed.** No new play was needed for any of this — it came out of the nine armed logs, the code, and two bench measurements.
 
 | term | size | status |

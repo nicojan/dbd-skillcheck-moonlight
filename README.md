@@ -8,11 +8,15 @@ It began as a measurement rig, because the reason repair and heal checks never l
 
 ## Status
 
-Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks — verified armed, over three real matches on 2026-08-16**: 56 gradeable fires, **48 Great (86%)**, 2 miss, and every press accounted for.
+Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks — verified armed, over seven real matches on 2026-08-16 and 2026-08-17**: 202 gradeable fires, **170 Great (84%)**, 24 good, 8 miss, and every press accounted for.
 
 **No presses are being lost.** An earlier version of this section claimed about a quarter never reached the game. That was wrong, and it was our own instrument: the freeze watch judged the tail of everything it saw against an absolute brightness floor, while the stray red left behind by a cleared check clears that floor. A landing that froze and then cleared inside the watch window therefore reported `still sweeping` — the same line a genuinely lost press produces. Once the watch was fixed to judge the contiguous lit block against the check's own peak, **32 of 32 fires in the next match produced a readable landing**, and 33 more since. There was never a delivery problem.
 
 **The remaining loss is link jitter, and it is not ours to fix.** Round trip over 56 armed fires runs 39-120 ms against a median of 56, which is about 3.7 degrees of scatter at the needle — against a Great half-band of 5.25. That alone sets the ceiling near 90%, which is roughly where it lands. The fit contributes under a degree, so better prediction cannot buy another Great; only a quieter link can.
+
+**That percentage is precision, not recall.** Until 2026-08-17 the bot could only count checks it fired on: a tracked check that `decide` gave up on — too few samples, a fit that never tightened, a rate out of range — fell out of the loop writing nothing, so a match that lost six checks logged the same as one that saw six. It now prints a `NO PRESS` line per dropped check with the reason behind it, and tallies them at exit. A check the classifier never labels at all is still invisible, and no logging change fixes that without ground truth.
+
+**Where the misses actually are: short tracks.** Split by how many frames the fit had, over 181 landings with two corrupt-zone outliers removed — 15 frames or fewer scores 70% Great and holds four of the five misses; 16-25 frames scores 79% with none; over 25 frames scores 81% at 3.66 degrees of scatter. At the ~37 fps the loop captures at, a full sweep is about 40 frames, so an 11-frame fit means the check was picked up some 700 ms late. That is a detection-latency problem, and it is the open one.
 
 Not handled: Merciless Storm, where the tracker deliberately abstains. Off-centre Doctor checks are still outside the capture crop. `full white` checks are fired at but **not graded** — that type draws its whole success zone as one solid block, so there is no Great band to measure and any landing inside would score Great by construction.
 
@@ -93,23 +97,29 @@ Start Moonlight and make it fullscreen. Then:
 .venv/bin/python tools/autorun.py --no-predict     # upstream's reactive behaviour
 ```
 
-Every predictive shot logs the fitted rate, the fit residual, the frame count behind it, and the angle it aimed at. It then reads where the needle froze and grades itself Great, good or miss on the spot, so accuracy is a measurement rather than an inference from the end-of-match tally. Each fire is also written to `landings-<timestamp>.jsonl` with its raw readings; read a match back with:
+Every predictive shot logs the fitted rate, the fit residual, the frame count behind it, and the angle it aimed at. It then reads where the needle froze and grades itself Great, good or miss on the spot, so accuracy is a measurement rather than an inference from the end-of-match tally. A check that is tracked and then given up on — too few samples, a fit that never tightened — prints a `NO PRESS` line saying so, so the log carries the checks it lost as well as the ones it hit. Each fire is also written to `landings-<timestamp>.jsonl` with its raw readings; read a match back with:
 
 ```bash
 .venv/bin/python tools/read_landings.py landings-20260816-214940.jsonl
 ```
 
-**A shell shortcut, if you run this often.** Drop this in `~/.zshrc` — it starts the stream, waits for it to settle, then runs the bot in the foreground of that terminal, which is where the Accessibility grant lives:
+**A shell shortcut, if you run this often.** Drop this in `~/.zshrc` — it starts the stream, waits for it to settle, launches the game on the host, then runs the bot in the foreground of that terminal, which is where the Accessibility grant lives:
 
 ```zsh
 dbd() {
-  local repo="$HOME/dev/dbd_autoSkillCheck"
-  pgrep -qx Moonlight || { nohup moonlight stream <host> "<app>" >/dev/null 2>&1 & disown; }
+  local repo="$HOME/dev/dbd_autoSkillCheck" host="${DBD_HOST:-<host>}"
+  nohup moonlight stream "$host" "Steam Big Picture" >/dev/null 2>&1 & disown
   sleep "${DBD_WAIT:-30}"
+  ssh -n "$host" 'export DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+    XAUTHORITY=$(ls /run/user/1000/.mutter-Xwaylandauth.* 2>/dev/null | head -1); \
+    setsid steam "steam://rungameid/381210" >/tmp/dbd-launch.log 2>&1 </dev/null &'
   cd "$repo" || return 1
   .venv/bin/python tools/autorun.py "$@" 2>&1 | tee "armed-$(date +%H%M).log"
 }
 ```
+
+Three legs, in that order: stream the host's Big Picture session to a window here, launch the game on the host so it renders into that stream, then run the bot. The game leg goes over ssh because the host's Sunshine exposes no app entry for the game — only Desktop and Big Picture — so it cannot be streamed directly; the env block is what makes the already-running Steam client findable from a non-login shell. Do **not** guard the stream behind `pgrep -qx Moonlight`: any already-open Moonlight window, including a plain GUI one, then makes the function skip the stream and sit there doing nothing. A second `moonlight stream` hands off to the running instance rather than opening a duplicate, so the guard buys nothing.
 
 Foreground and *that* terminal both matter: a detached or backgrounded run injects nothing and reports no error. Do not add `--pin-geometry` here — startup resolves before Moonlight is fullscreen, and the resume path self-corrects.
 
