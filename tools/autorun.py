@@ -74,12 +74,27 @@ FREEZE_WATCH_SECONDS = 0.80
 # cannot end the watch early.
 CLEARED_DARK_READS = 4
 
-# How much of a landing error is taken into the lead. The measured round trip is the only
-# latency figure this project has that was taken armed, but it is one sample from a link
-# whose spread is 46-98 ms, so following it fully would swing the aim by more than a Great
-# band on every check. A third of the error converges in a handful of checks and rides out
-# a single bad one; the clamps keep a wild reading (a wrapped revolution that slipped the
-# plausibility gate) from steering the run into never firing at all.
+# How much of a landing error is taken into the lead, WHEN --adapt-lead is passed. It is
+# off by default now: simulated over the 212 scored fires on record, no gain and no median
+# window beat holding the lead at 60 ms. Every one of them widened the landing spread
+# (5.75 deg fixed, against 5.77 at gain 0.1, 5.88 at 0.3, 5.86 through a 7-wide median),
+# and the Great counts they produced — 165 to 176 of 212 — all sit inside the +/-5.7 that
+# counting noise alone gives at an 81% rate.
+#
+# The reason is in the signal, not the filter. Over 236 armed fires the fit-derived round
+# trip has sd 12.6 ms while the tail read — a direct clock on the same link, key-down to
+# seeing the freeze — has sd 5.3, and the two correlate at only 0.44. Most of the swing
+# the loop was following was its own measurement error. Within a burst of checks seconds
+# apart, where the link cannot have moved, the landing spread is still 3.74 deg (11 ms):
+# that is aim noise, and no lead policy reaches it. Between sessions there is nothing left
+# to chase either — mean error at a fixed 60 ms runs -0.74 to +2.52 deg across all seven
+# logged sessions, every one of them inside a Great half-width.
+#
+# 2026-08-17 19:23 is what it cost: two 34 ms readings in a row against a tail that never
+# left 77, the lead walked 61 -> 47, and the check missed 8 deg early.
+#
+# The flag and the clamps stay. A link that genuinely drifts would show up in the measured
+# round trips first, and this is the lever to reach for when it does.
 LEAD_GAIN = 0.3
 LEAD_MIN_MS = 25.0
 LEAD_MAX_MS = 160.0
@@ -120,8 +135,9 @@ def parse_args(argv=None):
                    help="disable predictive firing; react to the classifier as upstream does")
     p.add_argument("--round-trip-ms", type=float, default=ROUND_TRIP_MS,
                    help="measured keypress->pixel latency the prediction leads by")
-    p.add_argument("--no-adapt-lead", dest="adapt_lead", action="store_false",
-                   help="keep the lead fixed instead of following the measured round trip")
+    p.add_argument("--adapt-lead", dest="adapt_lead", action="store_true",
+                   help="follow the measured round trip instead of holding the lead fixed "
+                        "(off by default — it cost more Greats than it won; see adapt_lead)")
     p.add_argument("--landing-log", default=None,
                    help="JSONL of every freeze watch (default: landings-<timestamp>.jsonl)")
     p.add_argument("--no-landing-log", dest="landing_log_enabled", action="store_false",

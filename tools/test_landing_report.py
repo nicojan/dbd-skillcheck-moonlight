@@ -507,6 +507,31 @@ def test_the_lead_follows_the_measured_round_trip():
           and autorun.adapt_lead(60.0, -5000.0) >= autorun.LEAD_MIN_MS)
 
 
+def test_the_lead_holds_still_unless_it_is_asked_not_to():
+    """The per-check adaptation is off by default, because it never paid for itself.
+
+    Simulated over the 212 scored fires on record, every gain/window combination raised
+    the landing spread above the fixed lead's 5.75 deg — 0.1/1 gave 5.77, 0.3/1 gave 5.88,
+    a 7-wide median 5.86 — and the Great counts (165-176 of 212) sat inside the +/-5.7 that
+    counting noise alone produces at that rate. The signal it steers on is the reason: the
+    fit-derived round trip has sd 12.6 ms over 236 fires while the tail read, a direct clock
+    measurement of the same link, has sd 5.3. Most of what the loop was chasing was its own
+    measurement error, and it spent real Greats doing it — 19:23-19:24 on 2026-08-17 read
+    34 ms twice, walked the lead 61 -> 47, and missed.
+
+    There is nothing left for it to track: per-session mean error at a fixed 60 ms spans
+    -0.74 to +2.52 deg across the seven logged sessions, all of it inside one Great
+    half-width. The flag stays, because a link that does drift would show up here first.
+    """
+    import autorun
+
+    check("the lead does not move on its own", autorun.parse_args([]).adapt_lead is False)
+    check("--adapt-lead still turns it back on",
+          autorun.parse_args(["--adapt-lead"]).adapt_lead is True)
+    check("and it starts where the data puts it", autorun.ROUND_TRIP_MS == 60.0,
+          autorun.ROUND_TRIP_MS)
+
+
 def test_fire_does_not_overshoot_the_lead_it_was_given():
     # sleep() overshot by 2-5 ms on every armed fire — requested 9 slept 12, requested 31
     # slept 36 — a systematic late bias worth a degree or two of the 10.5 deg band, and it
