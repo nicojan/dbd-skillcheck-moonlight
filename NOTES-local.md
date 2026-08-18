@@ -33,6 +33,8 @@ Working: window targeting, focus gating, detection, key delivery through Moonlig
 
 **What is left, in order of what the evidence supports.** (1) Link jitter, still the ceiling and still only movable by Moonlight/host settings or step 8 — which no longer has lost presses as a justification. (2) **The short-fit loss is no longer a finding** — pooled over all four matches it is 18/23 short against 99/113 long, a gap the sample cannot support. Do not chase it. (3) Nothing else — the fit, the sleep, the lead and the freeze watch are all closed, the adaptive lead is now measured as a wash against a fixed 60 ms, and key injection is measured as free.
 
+**Updated 2026-08-17 (night).** The adaptive lead is off and the fixed 60 ms is confirmed live — see the top of *Resume here* for the before/after. All-time the record is **297 gradeable fires, 246 Great (83%), 41 good, 10 miss**, none of the misses since the change. The remaining loss is no longer landing accuracy; it is checks that never get a press, and the first three of those are now recorded with their raw samples.
+
 **Which Moonlight leg holds the 11 ms is the one open question, and it decides step 8 (2026-08-17).** Replaying recorded checks uses the recordings' real capture timestamps, so live frame-arrival jitter is included and only the *input* path is absent — and it scores **sigma ~1.0 deg** against **3.8 deg** live. So ~3.7 deg / 11 ms arises between deciding and the needle stopping, and it is not our fitting. By elimination that is the input leg, which is what the deferred host-side `SendInput` agent addresses — but it is elimination, not measurement, and `tail_read` cannot close it (see the finding below). Two cheap discriminators, one match each, in order:
 
 1. **Run the host game at 120 fps.** If the game samples input once per rendered frame, 60 Hz contributes `16.7/sqrt(12)` = **4.8 ms** on its own — 2.3 of the 3.7 deg, and the largest single identified term. A settings change, not a build.
@@ -47,6 +49,32 @@ Everything predictive firing depends on has been verified against **75 real skil
 ## Resume here
 
 Read this section first; it is the state as of 2026-08-17.
+
+**2026-08-17 (night): the fixed lead is confirmed live, and the first no-press records say the dropped checks are not aim failures.** Four matches on the new code, 85 gradeable fires. Against the 212 fires the adaptive lead flew:
+
+| lead | fires | Great | good | MISS | sigma |
+|---|---|---|---|---|---|
+| adaptive (gain 0.3) | 212 | 175 (83%) | 27 | **10** | 5.9 deg |
+| fixed 60 ms | 85 | 71 (84%) | 14 | **0** | **3.7 deg** |
+
+This is the shape the offline simulation predicted and the reason to trust it: the Great rate barely moves (83 -> 84%), because the adaptation was never wrong about the *centre*. What it was doing was widening the distribution, and the tail is where that showed — sigma 5.9 -> 3.7 deg, and ten misses to none. The best single match on record is `landings-20260817-205948.jsonl`: **47 fires, 42 Great, 5 good, zero MISS, sigma 3.3, no dropped checks.** Treat the zero-MISS figure with the caution 85 draws deserve; the sigma is the sturdier half of the claim.
+
+**Leave the lead at 60.** Re-scored over all 294 gradeable fires it is still flat: 60 -> 82%, 62 -> 83%, 64 -> 84%, 66 -> 80%. Every session today ran late (+1.4 to +5.1 deg at a fixed 60) and every session yesterday ran early (-0.78, -0.55), so the offset is day-to-day, not a constant waiting to be corrected. Four checks across a 6 ms range is not evidence.
+
+**The no-press records paid for themselves on the first night.** Three dropped checks across the four matches — 97% of tracked checks fired — and the raw series settles what the log line never could. Both `fit too poor` drops are the same event, and it is not a bad fit:
+
+```
+20:49:11  34 samples over 972 ms, "fit too poor (16.4 deg RMS)" at +230 deg/s
+  angles: 6.0 10.0 19.0 28.5 ... 181.0 184.5 188.0 188.0 188.0 188.0 188.0 188.0 ...
+                                            \_ 11 samples, 250 ms, dead still _/
+```
+
+**The needle stopped mid-sweep and the tracker fitted the plateau along with the sweep.** 21:59:08 is the same shape — 27 samples, ten of them parked at 128.5. It is not a stalled stream: frames kept arriving at a normal 22-26 ms and the needle strength kept varying across the plateau (9 distinct values in 11 samples), so the crop was live and only the needle was still. In both cases the needle stopped *before* its Great band (188 against a band at 269-280; 128.5 against 189-199).
+
+A needle that stops dead is what a registered hit looks like, and we did not press — so the likeliest reading is that the check was resolved without the bot, by the operator's own space bar. **If that is right these are not lost checks at all, and counting them against recall is wrong.** `decide` has no concept of a needle that stops; it sees the plateau as scatter, fails the RMS gate and reports the one thing it can name. The fix is to recognise the plateau — `freeze_angle` already does exactly this after a press — and report "needle stopped, check resolved without us" as its own outcome. Not implemented: two records is thin, and the discriminating experiment is free (play a match without touching space).
+
+The third drop is a different and smaller thing: reason `scheduled` at 20:55:42, 8 samples, a *good* fit (2.61 deg RMS at 324 deg/s). `decide` had scheduled a press and the track was dropped before it fired — the loop holds for one more frame when `press_at_ms - now > frame_ms * 1.25`, and here the check left the screen during the hold. One occurrence in 88 tracked checks.
+
 
 **2026-08-17 (late evening): the adaptive lead is off. It was steering on its own measurement error.** The operator reported checks firing early; three of them were in the log within two minutes. The cause is not the aim.
 

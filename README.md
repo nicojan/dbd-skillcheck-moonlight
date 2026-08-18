@@ -8,7 +8,7 @@ It began as a measurement rig, because the reason repair and heal checks never l
 
 ## Status
 
-Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks — verified armed, over seven real matches on 2026-08-16 and 2026-08-17**: 202 gradeable fires, **170 Great (84%)**, 24 good, 8 miss, and every press accounted for.
+Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks — verified armed, over eleven real matches on 2026-08-16 and 2026-08-17**: 297 gradeable fires, **246 Great (83%)**, 41 good, 10 miss, and every press accounted for. The lead is a fixed 60 ms; on the four matches since it stopped adapting (85 fires) the record is **84% Great, zero miss, spread 3.7 deg against 5.9 before**.
 
 **No presses are being lost.** An earlier version of this section claimed about a quarter never reached the game. That was wrong, and it was our own instrument: the freeze watch judged the tail of everything it saw against an absolute brightness floor, while the stray red left behind by a cleared check clears that floor. A landing that froze and then cleared inside the watch window therefore reported `still sweeping` — the same line a genuinely lost press produces. Once the watch was fixed to judge the contiguous lit block against the check's own peak, **32 of 32 fires in the next match produced a readable landing**, and 33 more since. There was never a delivery problem.
 
