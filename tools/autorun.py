@@ -358,6 +358,50 @@ def no_press_note(desc, tracker, decision, tracked_ms):
     return note
 
 
+def no_press_record(desc, tracker, decision, tracked_ms, context=None):
+    """The JSONL record for a check that ended without a press, or None if there is none.
+
+    `no_press_note` names the reason; this keeps the evidence for it. The two are separate
+    because the line is for the operator watching the run and the record is for the
+    morning after, and the line has to stay short.
+
+    2026-08-17 20:34:20 is why it exists: `fit too poor (14.0 deg RMS); 26 samples over
+    751 ms, fit 14.0 deg RMS at +198 deg/s`. Twenty-six samples over 751 ms is a long,
+    unbroken track, and +198 deg/s is nowhere near the 300-360 deg/s every fire that night
+    measured — so those angles did not lie on one sweep. The line cannot say which of
+    "a wrap np.unwrap could not close", "two checks merged into one track" and "the
+    detector locked onto the zone instead of the needle" happened, and by the time it is
+    read the frames are gone. The fires have kept their raw series since 2026-08-16;
+    the checks that go WORST were still throwing theirs away.
+    """
+
+    if tracker is None or not tracker.samples or tracker.fired_at_ms is not None:
+        return None
+
+    fit = None if decision is None else decision.fit
+    zone = tracker.zone
+    record = dict(context or {})
+    record.update(
+        outcome="no press",
+        landing="no press",
+        reason="never decided" if decision is None else decision.reason,
+        tracked_ms=round(tracked_ms, 1),
+        n_samples=len(tracker.samples),
+        desc=desc,
+        rate_deg_s=None if fit is None else round(fit.rate_deg_s, 1),
+        fit_rms_deg=None if fit is None else round(fit.rms_deg, 2),
+        fit_n=None if fit is None else fit.n,
+        zone=None if zone is None else {
+            "great_start": round(zone.great_start, 1), "great_end": round(zone.great_end, 1),
+            "zone_start": round(zone.zone_start, 1), "zone_end": round(zone.zone_end, 1)},
+        # The whole point. (ms since the track began, angle, needle strength) per frame,
+        # in the same shape the fires record their freeze watch in.
+        samples=[[round(x.t_ms, 1), round(x.angle, 1), round(x.strength, 1)]
+                 for x in tracker.samples],
+    )
+    return record
+
+
 def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
                    lead_ms=None, record=None, context=None):
     """Read where the press landed and how long it took to get there.
@@ -547,10 +591,17 @@ def run(args):
     def stand_down(tracker):
         """Drop the tracker, saying why if the check never got a press. Returns None."""
 
-        note = no_press_note(tracked_desc, tracker, decision,
-                             0.0 if track_t0 is None else (monotonic() - track_t0) * 1000.0)
+        tracked_ms = 0.0 if track_t0 is None else (monotonic() - track_t0) * 1000.0
+        note = no_press_note(tracked_desc, tracker, decision, tracked_ms)
         if note is not None:
             log(note)
+            if landing_log is not None:
+                # Same file as the fires, marked `no press`, so one reader sees both. A
+                # dropped check that leaves nothing behind is the failure this whole log
+                # exists to close, and it was still open for exactly the worst checks.
+                landing_log.write(no_press_record(
+                    tracked_desc, tracker, decision, tracked_ms,
+                    context={"fire": None, "at": strftime("%H:%M:%S")}))
             # The counts are per reason, and `decide` builds its reasons with the numbers
             # in them ("only 4 samples"), so the digits come out or every check is its own
             # category and the tally says nothing.

@@ -26,8 +26,12 @@ against real angles, and the wall-clock wrapper is tested only for the things a 
 honestly answer.
 """
 
+import json
 import os
+import shutil
 import sys
+import tempfile
+from dataclasses import replace
 from time import monotonic
 from types import SimpleNamespace
 
@@ -588,6 +592,45 @@ def replace_fired(tracker):
     return replace(tracker, fired_at_ms=120.0)
 
 
+def test_a_dropped_check_leaves_its_samples_behind():
+    """A NO PRESS line names the reason but throws away the evidence for it.
+
+    2026-08-17 20:34:20 is the case: `fit too poor (14.0 deg RMS); 26 samples over 751 ms,
+    fit 14.0 deg RMS at +198 deg/s`. Twenty-six samples is a long, healthy track and 198
+    deg/s is nowhere near the 300-360 every fire that night measured, so those angles did
+    not lie on one sweep — but the line is all that survives, and it cannot distinguish a
+    wrap the unwrap missed from two checks merged into one track from the detector reading
+    the zone instead of the needle. The fires have kept their raw series since 2026-08-16
+    for exactly this reason; the checks that go WORST were still discarding theirs.
+    """
+    import autorun
+    from dbd.utils.needle_tracker import Sample, TrackerState, Zone
+
+    zone = Zone(great_start=237.0, great_end=247.0, zone_start=230.0, zone_end=270.0)
+    tracker = TrackerState(
+        samples=(Sample(0.0, 10.0, 120.0), Sample(26.0, 18.5, 118.0), Sample(52.0, 27.0, 121.0)),
+        zone=zone)
+    decision = SimpleNamespace(reason="fit too poor (14.0 deg RMS)", fit=None,
+                               press_at_ms=None, may_react=False, target_deg=None)
+
+    rec = autorun.no_press_record("repair-heal (out)", tracker, decision, 751.0,
+                                  context={"at": "20:34:20"})
+    check("a dropped check produces a record", rec is not None)
+    check("marked so the reader can separate it from a fire",
+          rec["outcome"] == "no press" and rec["landing"] == "no press", rec.get("outcome"))
+    check("carrying the reason", rec["reason"] == "fit too poor (14.0 deg RMS)")
+    check("and the raw samples that produced it",
+          rec["samples"] == [[0.0, 10.0, 120.0], [26.0, 18.5, 118.0], [52.0, 27.0, 121.0]],
+          rec.get("samples"))
+    check("with the zone it was judged against", rec["zone"]["great_start"] == 237.0)
+    check("and the context it was called with", rec["at"] == "20:34:20")
+
+    check("a check that fired is not a no-press",
+          autorun.no_press_record("x", replace(tracker, fired_at_ms=1.0), decision, 1.0) is None)
+    check("nor is an empty tracker",
+          autorun.no_press_record("x", TrackerState(), decision, 1.0) is None)
+
+
 def test_the_loop_actually_prints_the_no_press_line():
     """The unit above proves the sentence; this proves the loop ever reaches it.
 
@@ -638,12 +681,33 @@ def test_the_loop_actually_prints_the_no_press_line():
     autorun.Monitoring_window = lambda **kw: StubWindow()
     autorun.FocusWatcher = lambda **kw: StubWatcher()
     autorun.sleep = lambda _s: None
+    # A real log file, because `--dry-run` disables it and the record path would then be
+    # exercised by nothing at all — the same gap that let the NO PRESS line ship untested.
+    logdir = tempfile.mkdtemp()
+    logpath = os.path.join(logdir, "landings-test.jsonl")
     try:
-        autorun.run(autorun.parse_args(["--dry-run", "--no-landing-log"]))
+        autorun.run(autorun.parse_args(["--landing-log", logpath]))
     finally:
         (autorun.AI_model, autorun.Monitoring_window,
          autorun.FocusWatcher, autorun.sleep) = saved
     printed = "\n".join(printed)
+
+    written = [json.loads(x) for x in open(logpath, encoding="utf-8")] \
+        if os.path.exists(logpath) else []
+    shutil.rmtree(logdir, ignore_errors=True)
+    check("the dropped check reached the landing log", len(written) == 1, written)
+    check("...marked as a no-press", written and written[0]["landing"] == "no press", written)
+    check("...with its raw samples attached",
+          written and len(written[0]["samples"]) == 4, written)
+    # The record shares a file with the fires, so the reader has to keep them apart —
+    # counting a check that never got a press as a fire would inflate the very number
+    # this log exists to make honest.
+    import read_landings
+    lines = "\n".join(read_landings.summarise(written))
+    check("the reader does not count a no-press as a fire",
+          "1 fires" not in lines, lines)
+    check("...it reports it as a dropped check instead",
+          "no press" in lines and "1 tracked check" in lines, lines)
 
     check("a dropped check prints a NO PRESS line from the live loop",
           "NO PRESS" in printed, printed[-400:])

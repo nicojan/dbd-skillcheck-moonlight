@@ -24,6 +24,7 @@ measurement fault.
 import argparse
 import glob
 import json
+from re import sub
 import math
 import os
 import sys
@@ -67,6 +68,14 @@ def stdev(values):
     return math.sqrt(sum((v - mean) ** 2 for v in values) / (len(values) - 1))
 
 
+def strip_digits(text):
+    """`decide` builds its reasons with the numbers in them ("only 4 samples"), so the
+    digits come out or every dropped check is its own category and the tally says nothing.
+    Mirrors what the live loop does for its exit summary."""
+
+    return sub(r"[-+]?[0-9.]+", "N", text)
+
+
 def tally(values):
     counts = {}
     for v in values:
@@ -95,10 +104,22 @@ def gradeable(record):
 
 
 def summarise(records):
-    """Lines describing a set of fires. Pure, so the arithmetic can be tested."""
+    """Lines describing a set of fires. Pure, so the arithmetic can be tested.
+
+    Checks that never got a press share the file with the fires and are counted apart
+    from them. Folding them in would inflate the fire count with the checks that went
+    worst, which is the exact bias this log was built to remove — and reporting only the
+    fires is how every accuracy figure in these notes came to be quoted off survivors.
+    """
+
+    dropped = [r for r in records if r.get("outcome") == "no press"]
+    records = [r for r in records if r.get("outcome") != "no press"]
 
     if not records:
-        return ["no fires recorded"]
+        return (["no fires recorded"] if not dropped else
+                [f"no fires recorded — {len(dropped)} tracked check"
+                 f"{'' if len(dropped) == 1 else 's'} ended with no press",
+                 f"  reasons: {tally(strip_digits(r.get('reason', '?')) for r in dropped)}"])
 
     ungraded = [r for r in records if not gradeable(r)]
     records = [r for r in records if gradeable(r)]
@@ -110,6 +131,14 @@ def summarise(records):
     trips = [r["round_trip_ms"] for r in records if r.get("round_trip_ms") is not None]
 
     lines = [f"{len(records)} fires — {tally(r['landing'] for r in records)}"]
+    if dropped:
+        # Recall, stated as a fraction of the checks the tracker actually saw. It still
+        # cannot count a check the classifier never labelled at all.
+        seen = len(records) + len(dropped)
+        lines.append(f"  {len(dropped)} tracked check"
+                     f"{'' if len(dropped) == 1 else 's'} ended with no press "
+                     f"({100.0 * len(records) / seen:.0f}% of {seen} tracked checks fired)"
+                     f" — {tally(strip_digits(r.get('reason', '?')) for r in dropped)}")
     if verdicts:
         lines.append(f"  verdicts: {tally(verdicts)}"
                      f"  ({100.0 * verdicts.count('GREAT') / len(verdicts):.0f}% Great"
