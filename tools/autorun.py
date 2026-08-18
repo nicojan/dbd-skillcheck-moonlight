@@ -28,6 +28,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from re import sub
 from time import monotonic, sleep, strftime
 from typing import Optional
 
@@ -314,6 +315,33 @@ def summarise_landings(landings):
     return lines
 
 
+def no_press_note(desc, tracker, decision, tracked_ms):
+    """One line explaining a check that ended without a press, or None if there is none.
+
+    The silent failure this closes: a tracked check whose `decide` never schedules and
+    never sets `may_react` — too few samples, a fit that never tightened, a rate out of
+    range — simply falls out of the loop. It writes nothing at all, so a match that missed
+    six checks and one that saw six is the same log. Every miss so far has been diagnosed
+    off a fire that DID happen, which is a survivorship bias baked into the instrument.
+    """
+
+    if tracker is None or not tracker.samples or tracker.fired_at_ms is not None:
+        return None
+
+    reason = "never decided" if decision is None else decision.reason
+    note = (f"NO PRESS: {desc} — {reason}; {len(tracker.samples)} samples over "
+            f"{tracked_ms:.0f} ms")
+
+    fit = None if decision is None else decision.fit
+    if fit is not None:
+        note += f", fit {fit.rms_deg:.1f} deg RMS at {fit.rate_deg_s:+.0f} deg/s"
+    if tracker.zone is None:
+        note += ", no zone found"
+    else:
+        note += (f", Great {tracker.zone.great_start:.0f}-{tracker.zone.great_end:.0f} deg")
+    return note
+
+
 def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
                    lead_ms=None, record=None, context=None):
     """Read where the press landed and how long it took to get there.
@@ -496,6 +524,24 @@ def run(args):
 
     tracker = None          # TrackerState for the check in progress
     track_t0 = None         # monotonic origin for that check's timestamps
+    decision = None         # the last thing `decide` said about it, for the post-mortem
+    tracked_desc = ""       # what the classifier called it, for the same reason
+    no_press = []           # reasons tracked checks ended without a press
+
+    def stand_down(tracker):
+        """Drop the tracker, saying why if the check never got a press. Returns None."""
+
+        note = no_press_note(tracked_desc, tracker, decision,
+                             0.0 if track_t0 is None else (monotonic() - track_t0) * 1000.0)
+        if note is not None:
+            log(note)
+            # The counts are per reason, and `decide` builds its reasons with the numbers
+            # in them ("only 4 samples"), so the digits come out or every check is its own
+            # category and the tally says nothing.
+            no_press.append(sub(r"[-+]?[0-9.]+", "N",
+                                "never decided" if decision is None else decision.reason))
+        return None
+
     dropped = 0             # consecutive check-free frames since the last tracked one
     last_capture = None
     frame_ms = DEFAULT_FRAME_MS
@@ -521,8 +567,8 @@ def run(args):
                 fps = frames / elapsed if elapsed > 0 else 0
                 log(f"PAUSED  (focus lost) — {frames} frames, {hits} hits, {fps:.0f} fps")
                 active = False
-                tracker, last_capture = None, None  # the check is long gone by the time
-                                                    # focus comes back
+                tracker, last_capture = stand_down(tracker), None  # the check is long
+                                                    # gone by the time focus comes back
 
             # --- edge: paused -> active -------------------------------------------
             elif not active and now_active:
@@ -578,6 +624,7 @@ def run(args):
                 if tracker is None:
                     tracker, track_t0 = TrackerState(), captured
                 dropped = 0
+                tracked_desc = desc
 
                 # grab_screenshot returns RGB; the needle test is R - max(G,B) on a BGR
                 # array, so an unconverted frame silently measures blueness instead.
@@ -651,11 +698,12 @@ def run(args):
                 continue
 
             if pred in WIGGLE_PREDS:
-                tracker = None  # wiggle oscillates; a linear fit is wrong by construction
+                # wiggle oscillates; a linear fit is wrong by construction
+                tracker = stand_down(tracker)
             elif tracker is not None:
                 dropped += 1
                 if dropped >= TRACK_DROP_FRAMES:
-                    tracker = None
+                    tracker = stand_down(tracker)
 
             # --- reactive path: wiggle, and everything when --no-predict ------------
             if should_hit:
@@ -680,6 +728,10 @@ def run(args):
         # the run has to state its own result rather than leaving it to be greped out.
         for line in summarise_landings(landings):
             log(line)
+        if no_press:
+            # Recall, not precision: these are the checks the aim numbers above never saw.
+            tally = ", ".join(f"{no_press.count(r)} {r}" for r in sorted(set(no_press)))
+            log(f"  no press: {len(no_press)} tracked checks never got one — {tally}")
         if args.predict and args.adapt_lead:
             log(f"  lead: started at {args.round_trip_ms:.0f} ms, ended at {lead_ms:.0f}")
         if landing_log is not None:

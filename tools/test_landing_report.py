@@ -523,6 +523,46 @@ def test_fire_does_not_overshoot_the_lead_it_was_given():
           f"worst overshoot {worst:.1f} ms")
 
 
+def test_a_check_that_never_fires_explains_itself():
+    # The blind spot this closes: a tracked check that never schedules a press writes
+    # nothing at all, so a match that silently missed six checks logs the same as one that
+    # saw six. Every diagnosis so far has been made off fires that DID happen.
+    import autorun
+    from dbd.utils.needle_tracker import Decision, Fit
+
+    tracker = TrackerState(samples=(Sample(0.0, 10.0, 130.0), Sample(26.0, 18.0, 130.0)),
+                           zone=Zone(great_start=100.0, great_end=110.0,
+                                     zone_start=100.0, zone_end=150.0))
+    decision = Decision(reason="fit too poor (7.4 deg RMS)",
+                        fit=Fit(rate_deg_s=318.0, intercept=10.0, rms_deg=7.4, n=12))
+
+    note = autorun.no_press_note("repair-heal (out)", tracker, decision, 310.0)
+    check("a check that never fired reports the reason it did not",
+          note is not None and "fit too poor" in note, repr(note))
+    check("...and how much of the check it saw",
+          note is not None and "2 samples over 310 ms" in note, repr(note))
+
+    fired = autorun.no_press_note("repair-heal (out)", replace_fired(tracker), decision, 310.0)
+    check("a check that DID fire is not reported as a no-press", fired is None, repr(fired))
+
+    empty = autorun.no_press_note("repair-heal (out)", TrackerState(), decision, 10.0)
+    check("a tracker with no samples is not reported", empty is None, repr(empty))
+
+    undecided = autorun.no_press_note("repair-heal (out)", tracker, None, 40.0)
+    check("a check dropped before decide ran says so",
+          undecided is not None and "never decided" in undecided, repr(undecided))
+
+    missing_zone = autorun.no_press_note(
+        "repair-heal (out)", TrackerState(samples=tracker.samples), decision, 310.0)
+    check("a check with no zone found says so",
+          missing_zone is not None and "no zone found" in missing_zone, repr(missing_zone))
+
+
+def replace_fired(tracker):
+    from dataclasses import replace
+    return replace(tracker, fired_at_ms=120.0)
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
