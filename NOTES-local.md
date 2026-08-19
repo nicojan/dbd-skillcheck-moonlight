@@ -33,7 +33,7 @@ Working: window targeting, focus gating, detection, key delivery through Moonlig
 
 **What is left, in order of what the evidence supports.** (1) Link jitter, still the ceiling and still only movable by Moonlight/host settings or step 8 — which no longer has lost presses as a justification. (2) **The short-fit loss is no longer a finding** — pooled over all four matches it is 18/23 short against 99/113 long, a gap the sample cannot support. Do not chase it. (3) Nothing else — the fit, the sleep, the lead and the freeze watch are all closed, the adaptive lead is now measured as a wash against a fixed 60 ms, and key injection is measured as free.
 
-**Updated 2026-08-17 (night).** The adaptive lead is off and the fixed 60 ms is confirmed live — see the top of *Resume here* for the before/after. All-time the record is **297 gradeable fires, 246 Great (83%), 41 good, 10 miss**, none of the misses since the change. The remaining loss is no longer landing accuracy; it is checks that never get a press, and the first three of those are now recorded with their raw samples.
+**Updated 2026-08-18 (evening).** The lead is fixed at 60 ms with one exception: a round trip under 40 ms shortens the *next* check to 45, because the link drops in bursts rather than drifting. All-time the record is **420 gradeable fires, 348 Great (83%), 58 good, 14 miss** — and every miss on record sits in a session that contains one of those drops. The remaining loss is link jitter plus the drops; landing accuracy at a normal round trip is closed. See the top of *Resume here*.
 
 **Which Moonlight leg holds the 11 ms is the one open question, and it decides step 8 (2026-08-17).** Replaying recorded checks uses the recordings' real capture timestamps, so live frame-arrival jitter is included and only the *input* path is absent — and it scores **sigma ~1.0 deg** against **3.8 deg** live. So ~3.7 deg / 11 ms arises between deciding and the needle stopping, and it is not our fitting. By elimination that is the input leg, which is what the deferred host-side `SendInput` agent addresses — but it is elimination, not measurement, and `tail_read` cannot close it (see the finding below). Two cheap discriminators, one match each, in order:
 
@@ -48,7 +48,35 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 ## Resume here
 
-Read this section first; it is the state as of 2026-08-17.
+Read this section first; it is the state as of 2026-08-18.
+
+**2026-08-18 (evening): the link does not drift, it DROPS — and that is the one thing worth following.** Three previous attempts to follow the link all failed because they followed it *smoothly*. In 3 of 15 logged sessions the measured round trip halves to 31-35 ms, holds for a run of checks, then returns. Those runs are ~4% of fires and a third of every miss on record: a 33 ms trip against a 60 ms lead presses 27 ms early, 9 deg at 330 deg/s, and the Great band's leading edge has no early margin. Per session the correspondence is nearly one-for-one:
+
+| session | fires | MISS | trips <40 ms |
+|---|---|---|---|
+| 20260816-220620 | 71 | 2 | 4 |
+| 20260817-185256 | 40 | 3 | 3 |
+| 20260818-124803 | 16 | 2 | 2 |
+| 20260818-162457 | 28 | 4 | 4 |
+| 20260817-205948 | 47 | **0** | **0** |
+| 20260818-180307 | 39 | **0** | **0** |
+
+**Shipped as `BURST_TRIP_MS`/`BURST_LEAD_MS` (`4be46bc`, `2ac5425`): a round trip under 40 ms arms a 45 ms lead for the NEXT check only, then reverts.** One-shot, so it cannot walk the way `adapt_lead` did. Re-scored over 420 gradeable fires: **345 Great / 59 good / 16 MISS at a fixed 60, against 348 / 61 / 11.** Better on all three burst sessions, neutral on nine, one Great traded for a good on the tenth, never a new miss anywhere. It fires on ~4% of checks, so the plateau is untouched 96% of the time. Nothing hinges on the threshold: every value from 34 to 45 ms crossed with every lead from 40 to 50 removes 3 to 5 misses. **Re-derive all of it with `tools/rescore_policy.py`** — the tool `AIM_BIAS_DEG`'s comment has asked for since it was written.
+
+**Why the drops are catchable when a mean is not.** `P(trip < 40 | previous trip < 40)` is **41.7% against a 4.1% base rate**, a 10x lift, and three consecutive sub-36 ms fires would occur 0.005 times in 375 by chance. A gain or median window cannot use that — a 3-fire run inside a 5-wide window is averaged away. What the rule **cannot** do is catch the *first* fire of a run: 19:23:29 on 2026-08-17 missed 8 deg early at an unadapted 60.6 ms lead with its predecessor at a normal 63.8. Every miss it recovers is a continuation fire.
+
+**Two corrections to reasoning that is still written in `LEAD_GAIN`, which argues against ever adapting.** (1) Its central claim is that the tail read has sd 5.3 against the fit's 12.6, so the fit is mostly measurement error. **`tail_read_ms` has a hard floor at 72 ms — 0 of 377 fires below 70** — because `press` holds the key 50 ms before the watch's first grab, and 98% of fires resolve at the minimum 3 grabs. Its small spread is the width of a floor, not the precision of a clock, and it cannot corroborate or contradict any round trip under 72 ms, which is nearly all of them. **The cross-check the loop relies on is inert.** Making it real means starting the watch during the key hold; that is unstarted work. (2) It reads the 19:23 sequence as adaptation causing a miss. The log says the miss came first at an unadapted lead, and the adapted check after it improved from -8.0 to -5.0 deg.
+
+**A methodological trap, for anyone re-scoring.** 214 of 377 fires ran with `--adapt-lead` on and were **not** aimed at 60 ms, so reconstructing a landing from a 60 ms baseline mis-scores most of the record — it produced a wrong bias table here before it was caught. `rescore_policy.py` translates from the error and lead each fire actually recorded, which needs no overshoot constant. Both policies only *translate* the landing, which is why re-scoring is exact; what it cannot model is a policy that changes whether a check fires at all.
+
+**Two clean sessions on the new code.** `landings-20260818-180307.jsonl`: 39 fires, 33 Great, 6 good, **0 MISS**, sigma 3.6, 1 drop in 40 — no sub-40 trip, so the rule stayed correctly dormant. `landings-20260818-183610.jsonl`: 42 fires, 36 Great, 6 good, **0 MISS**, sigma **2.8**, the tightest on record; the rule fired 7 times here. All-time: **420 gradeable fires, 348 Great (83%), 58 good, 14 MISS.**
+
+**The rule's first live run found its own hole, now fixed.** A run of `full white` checks (degenerate zone read) produced trips of 8.0 and 6.8 ms and armed the shortened lead on both. `plausible_round_trip` missed them because it only rejects readings *above* half a revolution and has no lower bound. `BURST_TRIP_FLOOR_MS = 20` now guards the rule; the wider gap in `plausible_round_trip` is untouched and still there.
+
+**`dbd` could not launch Moonlight, and the cause was Gatekeeper, not the script.** The bundle and its nested dylibs carry `com.apple.quarantine`. Exec'ing `Contents/MacOS/Moonlight` directly makes Gatekeeper evaluate each nested dylib alone and refuse the `dlopen` of the QML plugins — Qt reports `module "QtQuick.Controls" plugin "qtquickcontrols2plugin" not found`, the engine cannot build a window, and the process exits ~1 s later with nothing on stdout. The function now launches via `open -a` (LaunchServices), which approves the bundle as a whole, and checks liveness with `pgrep` because `open` returns as soon as it hands off. `xattr -dr com.apple.quarantine` also fixes it and was deliberately not used. Every earlier working session had a Moonlight window opened by hand — i.e. the same LaunchServices path — which is why this never showed up before. The old form discarded stderr to `/dev/null`, so the failure was unobservable; preflight now checks venv, binary, ssh reachability and that the host offers the app, before the 30 s wait.
+
+**Wiggle: working, and completely unmeasured.** The reactive path presses with `fire(args, 0.0)` — zero lead — on class 8 `wiggle (great)`, which means the needle is *already in* the zone, ~75-135 ms before the key lands. That is the exact failure the predictive rewrite exists to fix, and it predicts systematic lateness. **Observation says otherwise: it works.** The likely reason is the oscillation — a needle that sweeps back and forth crosses the zone repeatedly, so a late press lands on a later crossing. Do not rebuild it. Do note that **zero wiggle records exist across all 15 landings logs**: the reactive path never calls `report_landing`, writes no record and produces no verdict, so "it is the one check type that already worked" in `autorun.py`'s docstring rests on observation alone. There is no ante class for wiggle (class 9 `wiggle (frontier)` is `hit: False`) and `--hit-ante` is gated on repair-heal's class 2, so it cannot help it.
+
 
 **2026-08-17 (night): the fixed lead is confirmed live, and the first no-press records say the dropped checks are not aim failures.** Four matches on the new code, 85 gradeable fires. Against the 212 fires the adaptive lead flew:
 
