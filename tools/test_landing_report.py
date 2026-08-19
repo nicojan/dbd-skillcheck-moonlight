@@ -585,6 +585,19 @@ def test_a_fast_round_trip_arms_a_shorter_lead_for_the_next_check():
           autorun.lead_for_check(30.0, 33.9) == 30.0,
           autorun.lead_for_check(30.0, 33.9))
 
+    # A reading below the floor is a broken measurement, not a fast link, and it must not
+    # arm anything. 2026-08-18 18:58 logged 8.0 and 6.8 ms on `full white` checks whose
+    # Great band was never measured; both are under the 72 ms the tail read alone cannot go
+    # below, so no press could physically have registered that fast.
+    check("an impossibly fast reading is ignored, not followed",
+          autorun.lead_for_check(base, 8.0) == base, autorun.lead_for_check(base, 8.0))
+    check("...and so is a negative one",
+          autorun.lead_for_check(base, -5.0) == base)
+    check("the floor sits under every legitimate reading on record",
+          autorun.BURST_TRIP_FLOOR_MS < 27.3, autorun.BURST_TRIP_FLOOR_MS)
+    check("...and still admits the burst population",
+          autorun.lead_for_check(base, 31.6) == autorun.BURST_LEAD_MS)
+
 
 def test_fire_does_not_overshoot_the_lead_it_was_given():
     # sleep() overshot by 2-5 ms on every armed fire — requested 9 slept 12, requested 31

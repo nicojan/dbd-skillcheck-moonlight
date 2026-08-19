@@ -150,8 +150,17 @@ LEAD_MAX_MS = 160.0
 # precision of a clock, and it cannot corroborate or contradict any round trip under 72 ms —
 # which is nearly all of them. Fixing that measurement is separate work and does not change
 # this rule.
+#
+# BURST_TRIP_FLOOR_MS exists because the first live run found the hole. On 2026-08-18 at
+# 18:58 a run of `full white` checks — no measurable Great band, so a degenerate zone read —
+# produced fit-derived trips of 8.0 and 6.8 ms, and the rule armed on them. Both are
+# impossible: `tail_read_ms` alone cannot go below 72 ms, and the fastest legitimate reading
+# in 420 fires is 27.3. `plausible_round_trip` did not catch them because it only rejects
+# readings ABOVE half a revolution; it has no lower bound. A reading under the floor is a
+# broken measurement, not a fast link, and following it is how a good rule earns a bad name.
 BURST_TRIP_MS = 40.0
 BURST_LEAD_MS = 45.0
+BURST_TRIP_FLOOR_MS = 20.0
 
 # How long SPACE is held down. This is NOT cosmetic: the press was 5 ms, which a desktop
 # text field registers fine (key events are queued, so duration is irrelevant) but a game
@@ -310,16 +319,18 @@ def adapt_lead(lead_ms, measured_ms, gain=LEAD_GAIN, lo=LEAD_MIN_MS, hi=LEAD_MAX
 
 
 def lead_for_check(base_lead_ms, last_trip_ms,
-                   threshold_ms=BURST_TRIP_MS, burst_lead_ms=BURST_LEAD_MS):
+                   threshold_ms=BURST_TRIP_MS, burst_lead_ms=BURST_LEAD_MS,
+                   floor_ms=BURST_TRIP_FLOOR_MS):
     """The lead for THIS check, given what the previous one measured. See BURST_TRIP_MS.
 
     Pure and one-shot: it reads the last round trip and nothing else, so it reverts by
-    itself the moment the link does. `min` because it may only ever shorten — a long
+    itself the moment the link does. Readings below `floor_ms` are measurement failures
+    rather than fast links and arm nothing — see BURST_TRIP_FLOOR_MS. `min` because it may only ever shorten — a long
     `--round-trip-ms` is the caller describing a slow link, and one fast reading is no
     reason to overrule them.
     """
 
-    if last_trip_ms is None or last_trip_ms >= threshold_ms:
+    if last_trip_ms is None or not floor_ms <= last_trip_ms < threshold_ms:
         return base_lead_ms
     return min(base_lead_ms, burst_lead_ms)
 
