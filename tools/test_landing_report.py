@@ -536,6 +536,56 @@ def test_the_lead_holds_still_unless_it_is_asked_not_to():
           autorun.ROUND_TRIP_MS)
 
 
+def test_a_fast_round_trip_arms_a_shorter_lead_for_the_next_check():
+    """The one case where following the link pays: a burst, caught one check at a time.
+
+    Distinct from `adapt_lead`, which walks a persistent lead by a gain and was measured to
+    cost Greats. This is a one-shot override that fires only when the previous check came
+    back under BURST_TRIP_MS and reverts by itself, so it cannot drift.
+
+    Re-scored by `tools/rescore_policy.py` over the 339 gradeable landings on record:
+    276 Great / 47 good / 16 MISS at a fixed 60, against 279 / 49 / 11 with this rule. Better
+    on all three sessions that contain a burst, neutral on nine, and one Great traded for a
+    good on the tenth. It never added a miss to any session, and it fires on 12 of 339 checks
+    — dormant 96% of the time, which is why it leaves the plateau the fixed lead sits on
+    undisturbed. Nothing hinges on the exact threshold: every value from 34 to 45 ms, at
+    every burst lead from 40 to 50, removes 3 to 5 misses.
+    """
+    import autorun
+
+    base = autorun.ROUND_TRIP_MS
+    check("with no previous check it holds the base lead",
+          autorun.lead_for_check(base, None) == base)
+    check("a normal round trip holds the base lead",
+          autorun.lead_for_check(base, 63.8) == base, autorun.lead_for_check(base, 63.8))
+    check("a round trip under the threshold shortens the next lead",
+          autorun.lead_for_check(base, 33.9) == autorun.BURST_LEAD_MS,
+          autorun.lead_for_check(base, 33.9))
+
+    # The threshold is a cut in a continuous low tail, not a natural boundary — see
+    # BURST_TRIP_MS. What it has to be is exclusive and inside the region the sweep showed
+    # to be robust, so a later edit cannot quietly move it somewhere untested.
+    check("the threshold is exclusive at its own value",
+          autorun.lead_for_check(base, autorun.BURST_TRIP_MS) == base)
+    check("...and fires just below it",
+          autorun.lead_for_check(base, autorun.BURST_TRIP_MS - 0.1) == autorun.BURST_LEAD_MS)
+    check("the threshold stays inside the region measured as robust",
+          34.0 <= autorun.BURST_TRIP_MS <= 45.0, autorun.BURST_TRIP_MS)
+    check("...and so does the lead it arms",
+          40.0 <= autorun.BURST_LEAD_MS <= 50.0, autorun.BURST_LEAD_MS)
+
+    # One-shot is the whole point. `adapt_lead` walked 61 -> 47 and stayed there, so when
+    # the link returned the aim was wrong in the other direction.
+    check("it reverts the moment the link does",
+          autorun.lead_for_check(base, 60.0) == base)
+
+    # It may only ever shorten. A deliberately long --round-trip-ms is someone telling us
+    # about a slow link; a burst reading is no reason to raise it.
+    check("it never lengthens a lead the caller chose",
+          autorun.lead_for_check(30.0, 33.9) == 30.0,
+          autorun.lead_for_check(30.0, 33.9))
+
+
 def test_fire_does_not_overshoot_the_lead_it_was_given():
     # sleep() overshot by 2-5 ms on every armed fire — requested 9 slept 12, requested 31
     # slept 36 — a systematic late bias worth a degree or two of the 10.5 deg band, and it
@@ -715,6 +765,98 @@ def test_the_loop_actually_prints_the_no_press_line():
           "repair-heal (out)" in printed and "samples" in printed, printed[-400:])
     check("...and the exit summary tallies it",
           "no press: 1 tracked checks" in printed, printed[-400:])
+
+
+def test_the_loop_actually_uses_the_shortened_lead():
+    """The unit above proves the arithmetic; this proves `run` ever applies it.
+
+    The whole reason this test exists: a correct helper that nothing calls is indis-
+    tinguishable from a link that never bursts. Twice before in this project a pure
+    function was right and the loop passed it the wrong thing — the ms/s lead bug, and the
+    predictive path that appeared never to press. So `run` is driven for real here, with
+    `decide` and `report_landing` stubbed to record what they were handed: the first check
+    lands a 33 ms round trip, and the second must be aimed with BURST_LEAD_MS, not 60.
+    """
+    autorun, printed = capture_log()
+    from dbd.utils.needle_tracker import Decision, Fit
+
+    leads_seen = []
+
+    class StubWatcher:
+        last_frontmost = "Moonlight"
+        def is_active(self):
+            return True
+
+    class StubWindow:
+        region = {"left": 0, "top": 0, "width": 224, "height": 224}
+        def describe(self):
+            return "stub"
+        def refresh(self):
+            pass
+
+    # ONE tracked frame per check: `decide` runs on every tracked frame, not once per
+    # check, and the stub schedules a press immediately — so one frame is one check.
+    # Three checks, so the shortened lead is seen to revert as well as apply.
+    script = [(1, "repair-heal (out)", False), (0, "none", False)] * 3
+
+    class StubModel:
+        def __init__(self, **kw):
+            self.calls = 0
+        def check_provider(self):
+            return "stub"
+        def grab_screenshot(self):
+            return np.zeros((224, 224, 3), dtype=np.uint8)
+        def predict(self, frame):
+            if self.calls >= len(script):
+                raise KeyboardInterrupt
+            pred, desc, hit = script[self.calls]
+            self.calls += 1
+            return pred, desc, {desc: 1.0}, hit
+        def cleanup(self):
+            pass
+
+    def stub_decide(state, now_ms, round_trip_ms=60.0):
+        leads_seen.append(round_trip_ms)
+        return Decision(press_at_ms=now_ms, reason="scheduled", target_deg=200.0,
+                        lands_at_ms=now_ms + round_trip_ms,
+                        fit=Fit(rate_deg_s=330.0, intercept=0.0, rms_deg=2.0, n=20))
+
+    # 33 ms on the first fire, then a normal 60 — so the rule must fire once and revert once.
+    # Indexed off the FIRES, not off `decide`, which the loop calls once per tracked frame.
+    trips = [33.0, 60.0, 60.0]
+    fires = []
+
+    def stub_report_landing(*a, **kw):
+        landing = autorun.Landing("measured", round_trip_ms=trips[len(fires)],
+                                  verdict="GREAT", error_deg=0.0)
+        fires.append(landing)
+        return landing
+
+    saved = (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
+             autorun.sleep, autorun.decide, autorun.report_landing, autorun.fire)
+    autorun.AI_model = StubModel
+    autorun.Monitoring_window = lambda **kw: StubWindow()
+    autorun.FocusWatcher = lambda **kw: StubWatcher()
+    autorun.sleep = lambda _s: None
+    autorun.decide = stub_decide
+    autorun.report_landing = stub_report_landing
+    autorun.fire = lambda args, wait_ms: 0.0       # never touch the real keyboard
+    try:
+        autorun.run(autorun.parse_args([]))
+    finally:
+        (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
+         autorun.sleep, autorun.decide, autorun.report_landing, autorun.fire) = saved
+    printed = "\n".join(printed)
+
+    check("the loop aimed three checks", len(leads_seen) == 3, leads_seen)
+    check("...and fired all three", len(fires) == 3, fires)
+    check("the first check used the base lead — a burst cannot be seen before it starts",
+          leads_seen[0] == autorun.ROUND_TRIP_MS, leads_seen)
+    check("the check after a 33 ms round trip was aimed with the shortened lead",
+          leads_seen[1] == autorun.BURST_LEAD_MS, leads_seen)
+    check("...and the loop said so", "for this check" in printed, printed[-500:])
+    check("the check after a normal round trip went back to the base lead",
+          leads_seen[2] == autorun.ROUND_TRIP_MS, leads_seen)
 
 
 def main():

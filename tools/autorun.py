@@ -99,6 +99,60 @@ LEAD_GAIN = 0.3
 LEAD_MIN_MS = 25.0
 LEAD_MAX_MS = 160.0
 
+# A round trip under BURST_TRIP_MS arms BURST_LEAD_MS for the NEXT check only.
+#
+# This is the one place following the link pays, and it took four attempts to find because
+# the first three tried to follow it *smoothly*. The link does not drift; it drops. In 3 of
+# 13 logged sessions the measured round trip halves to 31-35 ms and stays there for a run of
+# checks, then returns. Those runs are 4% of all fires and a third of every miss on record:
+# a 33 ms trip against a 60 ms lead presses 27 ms early, which is 9 deg at 330 deg/s, and
+# the Great band's leading edge has no early margin to absorb it.
+#
+# The drops are not noise, and that is what makes them catchable. Three consecutive fires
+# under 36 ms would happen 0.005 times in 375 by chance; it happened, on 2026-08-18 at
+# 17:29. Conditionally, P(trip < 40 | previous trip < 40) is 41.7% against a 4.1% base rate
+# — a 10x lift. A gain or a median window cannot use that: a 3-fire run inside a 5- or
+# 9-wide window is averaged away, and `adapt_lead` at gain 0.3 needs three readings to move
+# 40 ms, by which time the burst is over.
+#
+# Re-score it with `tools/rescore_policy.py`, which is where these numbers come from and
+# which re-derives them from whatever landings are on disk — so expect the totals to grow.
+# As of 2026-08-18, over the 339 gradeable landings from 13 sessions: 276 Great / 47 good /
+# 16 MISS at a fixed 60, against 279 / 49 / 11 with this rule. Better on all three burst sessions, neutral on nine, one
+# Great traded for a good on the tenth, and it never added a miss to any session. It fires
+# on 12 of 339 checks, so the plateau the fixed lead sits on is untouched 96% of the time.
+#
+# The threshold is NOT a natural boundary, and an earlier version of this comment wrongly
+# claimed it was. The low tail is continuous — 34.3, 35.4, 36.4, 37.2, 38.4, 39.0, 39.2,
+# then 41.2 — so 40 is a cut in a tail, and the 2 ms gap it happens to fall in is a
+# small-sample artifact. What justifies it is that nothing hinges on it: every threshold
+# from 34 to 45 crossed with every lead from 40 to 50 removes 3 to 5 misses, and most gain
+# Greats. (40, 45) is near the best of that region rather than a knife-edge in it. 45 is
+# also the shortest lead that still lands late of the early edge if the link snaps back
+# mid-check.
+#
+# No expiry, deliberately. The gaps between a sub-40 fire and the next one run
+# 5, 5, 7, 7, 10, 15, 16, 31, 51, 82, 88, 196 s — the state outlives any "burst" window
+# worth the name, and every expiry tested (10-120 s) gave back misses for nothing.
+#
+# What this CANNOT do is catch the first fire of a run. 19:23:29 on 2026-08-17 missed 8 deg
+# early with the lead at 60.6 and its predecessor at a perfectly normal 63.8 — nothing in
+# the history could have known. Every miss this recovers is a continuation fire. Note that
+# the LEAD_GAIN block below reads that same 19:23 sequence as adaptation CAUSING the miss;
+# the log says the miss came first, at an unadapted lead, and the adapted check after it
+# improved from -8.0 to -5.0 deg.
+#
+# Read LEAD_GAIN below for the policy this is NOT — but its central argument does not hold.
+# It reasons that the tail read has sd 5.3 against the fit's 12.6, so the fit is mostly
+# measurement error. `tail_read_ms` has a hard floor at 72 ms (0 of 377 fires below 70),
+# because `press` holds the key 50 ms before the watch takes its first grab, and 98% of
+# fires resolve at the minimum 3 grabs. Its small spread is the width of that floor, not the
+# precision of a clock, and it cannot corroborate or contradict any round trip under 72 ms —
+# which is nearly all of them. Fixing that measurement is separate work and does not change
+# this rule.
+BURST_TRIP_MS = 40.0
+BURST_LEAD_MS = 45.0
+
 # How long SPACE is held down. This is NOT cosmetic: the press was 5 ms, which a desktop
 # text field registers fine (key events are queued, so duration is irrelevant) but a game
 # polling input once per rendered frame can miss entirely — 16.7 ms between polls at 60 fps,
@@ -253,6 +307,21 @@ def adapt_lead(lead_ms, measured_ms, gain=LEAD_GAIN, lo=LEAD_MIN_MS, hi=LEAD_MAX
     """
 
     return min(hi, max(lo, (1.0 - gain) * lead_ms + gain * measured_ms))
+
+
+def lead_for_check(base_lead_ms, last_trip_ms,
+                   threshold_ms=BURST_TRIP_MS, burst_lead_ms=BURST_LEAD_MS):
+    """The lead for THIS check, given what the previous one measured. See BURST_TRIP_MS.
+
+    Pure and one-shot: it reads the last round trip and nothing else, so it reverts by
+    itself the moment the link does. `min` because it may only ever shorten — a long
+    `--round-trip-ms` is the caller describing a slow link, and one fast reading is no
+    reason to overrule them.
+    """
+
+    if last_trip_ms is None or last_trip_ms >= threshold_ms:
+        return base_lead_ms
+    return min(base_lead_ms, burst_lead_ms)
 
 
 class LandingLog:
@@ -574,6 +643,7 @@ def run(args):
     log(f"waiting for '{args.window}' to become active (ctrl-c to quit)")
 
     lead_ms = args.round_trip_ms
+    last_trip_ms = None   # previous check's measured round trip; see BURST_TRIP_MS
 
     active = False
     frames = 0
@@ -696,7 +766,8 @@ def run(args):
                 # grab_screenshot returns RGB; the needle test is R - max(G,B) on a BGR
                 # array, so an unconverted frame silently measures blueness instead.
                 tracker = observe(tracker, frame[:, :, ::-1], (captured - track_t0) * 1000.0)
-                decision = decide(tracker, (monotonic() - track_t0) * 1000.0, lead_ms)
+                check_lead_ms = lead_for_check(lead_ms, last_trip_ms)
+                decision = decide(tracker, (monotonic() - track_t0) * 1000.0, check_lead_ms)
 
                 if decision.press_at_ms is not None:
                     now_ms = (monotonic() - track_t0) * 1000.0
@@ -724,9 +795,12 @@ def run(args):
                     log(f"  timing: frame age {frame_age_ms:.0f} ms at decide, lead "
                         f"{requested_ms:.0f} ms requested / "
                         f"{(pressed_at - track_t0) * 1000 - now_ms:.0f} ms slept")
+                    if check_lead_ms != lead_ms:
+                        log(f"  lead: {lead_ms:.0f} -> {check_lead_ms:.0f} ms for this "
+                            f"check — previous round trip was {last_trip_ms:.0f} ms")
                     landing = report_landing(
                         model, tracker, track_t0, args, pressed_at, decision.fit,
-                        lead_ms=lead_ms,
+                        lead_ms=check_lead_ms,
                         record=None if landing_log is None else landing_log.write,
                         context={"fire": len(landings) + 1, "at": strftime("%H:%M:%S"),
                                  "desc": desc, "target_deg": decision.target_deg,
@@ -736,6 +810,13 @@ def run(args):
                                  "frame_age_ms": round(frame_age_ms, 1)})
                     if landing is not None:
                         landings.append(landing)
+
+                    # Carry it for exactly one check. A fire that produced no trip leaves
+                    # the previous reading in place rather than clearing it: the burst runs
+                    # through checks the watch could not measure, and treating an
+                    # unmeasured check as a normal one is how the run gets missed.
+                    if landing is not None and landing.round_trip_ms is not None:
+                        last_trip_ms = landing.round_trip_ms
 
                     # Follow the link rather than a constant measured on one match. The
                     # correction is applied AFTER the landing is recorded, so the log shows
