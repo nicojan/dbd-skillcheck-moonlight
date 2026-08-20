@@ -48,7 +48,32 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 ## Resume here
 
-Read this section first; it is the state as of 2026-08-18.
+Read this section first; it is the state as of 2026-08-19.
+
+**2026-08-19 (evening): the link shifted BETWEEN sessions for the first time, ~20 ms below the band every prior session occupied. Untested fix staged, not yet run.** The operator reported the mechanism landing early "mostly", across this game and earlier ones. It is not the aim and not the model. Per-session medians over all 18 landings logs:
+
+| sessions | trip median | error median |
+|---|---|---|
+| 20260816-204337 .. 20260819-174342 (17 sessions) | 52.2 - 67.5 ms | -1.5 to +3.5 deg |
+| **20260819-194107** | **41.7 ms** | **-2.50 deg** (mean -2.81) |
+
+Every prior session sits inside a 15 ms band; this one sits 10 ms below its floor. The spread is ordinary — sd 9.9 against a 7.2-19.9 range across sessions — so **the shift is in the centre, not in the noise**. A 42 ms trip against the fixed 60 ms lead presses ~18 ms early, which is 5.8 deg at 324 deg/s: the Great band's leading edge has no early margin, so the distribution's centre sits near the early edge and its lower tail falls off.
+
+**The lead split inside that one log is the cleanest evidence on record.** 21 fires, only 10 gradeable (the rest `full white`, degenerate zone read):
+
+| lead used | fires | mean error | GREAT | MISS | ungraded |
+|---|---|---|---|---|---|
+| 45 ms (burst override) | 9 | -0.72 deg | **5** | 0 | 4 |
+| 60 ms (fixed) | 12 | -4.38 deg | 0 | **5** | 7 |
+
+Perfect separation on the 10 graded fires (Fisher p ~ 0.004). **The burst rule was right for the wrong reason.** It arms on "the previous trip was fast", so it covered 9 of 21 fires — but tonight *every* trip was fast, and the 12 fires it did not cover are exactly the 5 misses. Its known hole (it cannot catch the first fire of a run) generalises badly: when the whole session is the run, the rule catches only the continuations.
+
+**This does not overturn "adapting the lead is rejected" — it moves the goalposts the rejection was measured against.** All four rejections (rolling medians 5/9/15, per-session medians, a hindsight oracle) were scored on sessions whose medians all sat 52-68 ms, where within-session spread genuinely swamps between-session drift. A 20 ms between-session shift is outside that envelope and the earlier tests could not have seen it. Re-run `rescore_policy.py` once this session has a sibling.
+
+**Staged for the next armed match, unrun:** arm with `dbd --round-trip-ms 45`. This also makes the burst override inert — `lead_for_check` uses `min(base, BURST_LEAD_MS)` with `BURST_LEAD_MS = 45.0` — so the log comes back single-population instead of the two-lead mixture above. Alongside it, `tools/record_frames.py --fps 15 --seconds 2400 --max-gb 10` in a second terminal: 15 rather than the 30 default to halve capture contention with the armed loop, and the only path that can catch a Madness check, since autorun's 224 centre crop cannot see one. Watch autorun's `fps` on each `PAUSED` line (33-38 tonight) and `frame_age_ms at decide` (21-28 tonight); a rise in either is contention showing up in the aim.
+
+**A measurement trap, and `read_landings.py` already documents it.** `round_trip_ms` is derived from the settled angle through the fit — `round_trip = lead - overshoot + error/rate` — so it and `error_deg` are one observation in two units. Correlating them looks like overwhelming confirmation (r = 0.996 across 659 fires) and confirms nothing. The per-session comparison above avoids this only because it contrasts *different sessions* rather than two fields of one record.
+
 
 **2026-08-18 (evening): the link does not drift, it DROPS — and that is the one thing worth following.** Three previous attempts to follow the link all failed because they followed it *smoothly*. In 3 of 15 logged sessions the measured round trip halves to 31-35 ms, holds for a run of checks, then returns. Those runs are ~4% of fires and a third of every miss on record: a 33 ms trip against a 60 ms lead presses 27 ms early, 9 deg at 330 deg/s, and the Great band's leading edge has no early margin. Per session the correspondence is nearly one-for-one:
 
