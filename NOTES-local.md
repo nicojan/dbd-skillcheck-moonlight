@@ -40,7 +40,7 @@ Working: window targeting, focus gating, detection, key delivery through Moonlig
 1. **Run the host game at 120 fps.** If the game samples input once per rendered frame, 60 Hz contributes `16.7/sqrt(12)` = **4.8 ms** on its own — 2.3 of the 3.7 deg, and the largest single identified term. A settings change, not a build.
 2. **Change Moonlight bitrate or decoder and re-run.** If sigma moves, the video leg is corrupting the current-angle estimate and step 8 will not help. If it does not move, step 8 is justified on jitter — which matters, because it lost its original justification when lost presses were ruled out.
 
-Not working: Merciless Storm (deliberate abstention), off-centre Doctor checks (outside the capture crop).
+Not working: off-centre Doctor checks (outside the capture crop). **Merciless Storm was listed here as a "deliberate abstention" until 2026-08-20; that was the tracker's behaviour, not the bot's — it presses reactively on every revolution. See "Resume here".**
 
 **The reason is now settled, and it is not a tuning problem.** The Great band is 10-20 degrees wide and the needle sweeps at 327-609 deg/s, so the window is **16-61 ms** — always *narrower* than the ~72 ms keypress-to-pixel round trip. Reacting to a Great cannot work, in any configuration, because the needle has already left by the time the key lands. `--hit-ante` was never going to fix it. The only path to Great is to **predict** where the needle will be and press early.
 
@@ -49,6 +49,33 @@ Everything predictive firing depends on has been verified against **75 real skil
 ## Resume here
 
 Read this section first; it is the state as of 2026-08-20.
+
+**2026-08-20 (later): "Merciless Storm — deliberate abstention" was wrong. The bot presses on 17 of 17 revolutions.** The claim was true of the *tracker* and was recorded as if it were true of the *bot*. `replay_tracker.py` only exercises the predictive path, and `decide` returning `may_react=True` is not a decision not to press: `autorun.py:848` then fires reactively on the classifier's cue. Storm draws an unfilled outline, so `find_zone` returns None, `decide` returns `no zone drawn yet` with `may_react`, the classifier calls the frames `full black (great)`, and the key goes down. New tool: `tools/replay_centre_crop.py`, which replays the **live** decision path against a source video cropped the way the live grab crops.
+
+| clip | checks | tracker (`replay_tracker.py`) | **bot (`replay_centre_crop.py`)** |
+|---|---|---|---|
+| `merciless-storm` (17 revolutions, no Doctor) | 17 | abstains on all | **presses on all 17**, every one reactive |
+| `merciless-storm-madness2` (Doctor + Storm) | 13 | abstains on all | **presses on 8**, 7 reactive and 1 predictive |
+
+**Whether those presses land is still unmeasured, and that is now the open question rather than a curiosity.** A reactive press carries no lead at all, so it lands the whole round trip late — ~60 ms of link plus ~24 ms of frame age at ~300 deg/s is about **25 deg past where the model saw the needle**. Storm's success zone has never been measured because it draws no solid band (`measure_zone.py` reports `great = 0.0` on every Storm frame), so there is no way yet to say whether 25 deg late is a hit or an explosion. Storm demands consecutive hits and the bot does fire about once per revolution, so the design comment's "beats not pressing at all" may well be right — it has simply never been checked.
+
+**Off-centre Madness checks are mostly invisible to the bot, but not harmlessly so.** Cropped as the live grab crops (centre 224 of the content), against the four known Madness positions:
+
+| off-centre | what the armed loop does |
+|---|---|
+| 148.6 px | classifier sees no check at all, 0 of 68 frames a hit class — **no press** |
+| 93.9 px | **FIRE predictive**, aiming 305.5 deg |
+| 84.2 px | HIT reactive |
+| 178.2 px | HIT reactive, on 2 frames, with the ring essentially outside the crop |
+
+The 93.9 px case is the one that matters: a fully aimed predictive press, timed off `needle_angle` measured about the **crop** centre rather than the ring centre. That is the wrong-centre trap already documented for `scan_frames.py`, except it fires live instead of mismeasuring offline — an arbitrary press time wearing the costume of an aimed one. The 178.2 px case is a false positive: the ring spans 113-243 px from centre so nothing check-like is in the crop, and two frames still classified `full black (great)`. Same family as the loadout-menu perk icon at 1.000 confidence, and again what protects us is class assignment rather than confidence.
+
+**The obvious mitigation does not work.** Requiring two consecutive hit-class frames before a reactive press was measured against both clips: the 178 px false positive has a run of 2, and 7 of the 17 genuine Storm revolutions also peak at 2. The gate cannot separate them.
+
+**What this evidence cannot say.** The only Madness footage in the repo is `merciless-storm-madness2.mp4`, so **every off-centre check testable here is also a Merciless Storm check** — the `full black` rendering and the missing zone are Storm's, not Doctor's. Off-centre behaviour on a normal `repair-heal` check is untested, and no footage of one exists. n = 1 clip for all of it.
+
+**The open design choice, unresolved:** suppress the reactive fallback when no zone is drawn — making Storm a true abstention, which is what this file claimed for five days — or keep it and accept presses whose landing nobody has measured. Measuring Storm's zone off the outline arc is what would settle it, and is the cheaper of the two paths to an answer.
+
 
 **2026-08-20 (evening): 45 ms is ruled out. The fast link did not hold, the fixed 60 ms stands, and 65 is a new untested candidate.** One armed match at `--round-trip-ms 45`, `landings-20260820-171452.jsonl`: 20 graded fires, 8 GREAT / 12 good / **0 MISS**. The operator's summary — "didn't miss any skill checks but also didn't get many Greats" — is one fact, not two.
 
@@ -241,6 +268,8 @@ Replayed frame by frame, with ground truth measured separately from the whole ch
 | `recordings_video/oppression` (native 4K, 363 deg/s) | 1 | **Great** | — | 1.9 deg |
 | Merciless Storm, both clips | 29 | **abstains on all 29** | — | — |
 
+**That Merciless Storm row is about the tracker, not the bot, and was misread as the bot for five days.** `replay_tracker.py` never exercises the reactive fallback, and the live loop presses on all 17 revolutions of the Storm clip. Corrected 2026-08-20; see "Resume here" and `tools/replay_centre_crop.py`.
+
 **The original column is not reproducible and should not be quoted.** Two separate causes, both found on 2026-08-16: the two `full white` checks in `recordings_missed` were never gradeable (their "Great band" measures 58-59 deg because the type draws the whole zone solid — they are hits, not Greats), and one check in each set now declines to fire at `AIM_BIAS_DEG = 0`. See the constant's comment for that trade.
 
 Live dry-run against a real match fired on two checks: +327 deg/s at 2.5 deg RMS over 32 frames, +352 at 2.1 over 17. The live loop gets *more* frames than the recordings do, so the fit is not frame-starved.
@@ -359,6 +388,7 @@ What exists to build against, all offline and replayable:
 | `tools/measure_zone.py` | Measures the Great/Good zone widths from the drawn pixels of **unhit** checks; refines the ring centre, then splits fill from outline by radial thickness |
 | `tools/record_frames.py` | Records full frames during play at 30 fps with **no inference** (threaded JPEG writers), for offline analysis |
 | `tools/scan_frames.py` | Offline 224-tile sweep over recorded frames; the off-centre hunt without a live frame-rate budget |
+| `tools/replay_centre_crop.py` | Replays the **live** decision path (predictive *and* reactive) against a source video, cropped the way the live grab crops. The only tool that answers "would the bot press here?" for Merciless Storm and off-centre Madness, which `replay_tracker.py` cannot |
 | `tools/sweep_rates.py` | Per-check sweep rate and fit quality from a full-frame session (centre crop only, so ~1 inference/frame) |
 | `tools/ingest_video.py` | Turns any downloaded gameplay mp4 into `recordings/`-format checks: rescales to 1080p, finds rings by Hough + needle confirmation, keeps only clusters with coherent rotation, cuts continuous sweeps per revolution, refines each ring centre, and writes 224 crops with model-classified manifests |
 | `tools/prune_frames.py` | Deletes frames far from any detected check; dry run by default. Three detection sources: `--scan-log`, `--sessions` (tile-sweep `hits/`), `--centre-detections` (the `sweep_rates.py` cache — **only** for sessions known to have no off-centre checks) |
