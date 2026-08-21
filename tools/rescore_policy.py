@@ -41,6 +41,7 @@ import autorun
 from dbd.utils.needle_tracker import AIM_BIAS_DEG, Zone, score_freeze
 
 MAX_PLAUSIBLE_TRIP_MS = 200.0   # past this it is a wrapped revolution, not a latency
+HISTORIC_BIAS_DEG = 1.0         # the aim used before `aim_bias_deg` was logged per fire
 
 
 def load_sessions(paths):
@@ -90,8 +91,15 @@ def regrade(sessions, lead_of, bias_deg=AIM_BIAS_DEG):
             per_ms = abs(rate) / 1000.0
 
             lead_delta = record["lead_ms"] - lead_of(last_trip)
+            # From the aim this fire was ACTUALLY taken with, never the live constant. Read
+            # from the constant, every recorded landing silently re-baselines the moment
+            # someone edits it, and the tool reports the new value as already shipped — it
+            # did exactly that when the bias moved off 1.0. `HISTORIC_BIAS_DEG` covers the
+            # fires that pre-date the field; git says the constant was 1.0 from 08-15 17:01,
+            # before the earliest landings file, so every one of them was aimed at 1.0.
+            was = record.get("aim_bias_deg", HISTORIC_BIAS_DEG)
             bias_delta = (min(bias_deg, zone.great_width / 4.0)
-                          - min(AIM_BIAS_DEG, zone.great_width / 4.0))
+                          - min(was, zone.great_width / 4.0))
             # into along-sweep degrees, where negative is early and the Great band's leading
             # edge sits at -great_width/2 with no margin behind it
             along = record["error_deg"] * sign + lead_delta * per_ms + bias_delta
@@ -130,7 +138,7 @@ def main(argv):
 
     print("\n=== aim bias (lead held at the shipped burst rule) ===")
     rule = lambda t: autorun.lead_for_check(base, t)
-    for bias in (0.0, 0.5, 1.0, 1.5, 2.0, 3.0):
+    for bias in (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0):
         mark = "  <-- shipped" if bias == AIM_BIAS_DEG else ""
         print(line("bias %.1f deg%s" % (bias, mark), *regrade(sessions, rule, bias_deg=bias)))
 

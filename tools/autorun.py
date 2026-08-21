@@ -39,7 +39,8 @@ from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.needle_tracker import (
-    ROUND_TRIP_MS, Reading, TrackerState, decide, mark_fired, needle_angle, observe,
+    AIM_BIAS_DEG, ROUND_TRIP_MS, Reading, TrackerState, decide, mark_fired, needle_angle,
+    observe,
     read_watch, score_freeze, strength_reference, time_to_angle,
 )
 
@@ -540,6 +541,12 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
                 "lit_floor": round(watch.floor, 1),
                 "reference_strength": None if reference is None else round(reference, 1),
                 "lead_ms": lead_ms,
+                # Recorded per fire because `rescore_policy.py` has to translate a landing
+                # from the aim it was ACTUALLY taken with. It used to read the live constant
+                # instead, which silently re-baselined the whole history the moment the
+                # constant moved — the same class of error the lead already avoids by
+                # logging `lead_ms`.
+                "aim_bias_deg": AIM_BIAS_DEG,
                 "watch_ms": round((monotonic() - pressed_at) * 1000.0, 1),
                 "rate_deg_s": None if fit is None else round(fit.rate_deg_s, 1),
                 "fit_rms_deg": None if fit is None else round(fit.rms_deg, 2),

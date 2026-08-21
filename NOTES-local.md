@@ -54,6 +54,25 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 Read this section first; it is the state as of 2026-08-20.
 
+**2026-08-20 (23:45): aim bias 1.0 -> 2.5 deg, because the objective was wrong, not the tuning.** Nico asked for good over miss. Every earlier bias decision maximised Great and treated `good` and `MISS` as the same kind of not-Great; they are not, and the bias trades along exactly the axis that separates them. The Great band sits at the *leading* edge of a ~49 deg success zone, so a late press spills into ~38 deg of Good and an early one misses outright — in 654 recorded fires **nothing has ever missed late**.
+
+Re-scored over every `landings-*.jsonl` (`tools/rescore_policy.py`, lead on the shipped burst rule):
+
+| aim bias | GREAT | good | MISS |
+|---|---|---|---|
+| 1.0 deg (was shipped) | 531 (81.2%) | 98 | 25 |
+| 2.0 deg | 506 (77.4%) | 132 | 16 |
+| **2.5 deg (shipped)** | **500 (76.5%)** | **142** | **12** |
+| 3.0 deg | 490 (74.9%) | 153 | 11 |
+
+Misses halve for ~5 points of Great. No session of the 22 regresses on misses and 10 improve. 2.5 and no further because `decide` clamps the bias to `great_width / 4`, which on the usual 10 deg Great *is* 2.5 — past it the re-score grades a bias that was never applied.
+
+The 22:45 match that prompted this: 35 fires, 28 GREAT / 4 good / **3 MISS**, all three misses early (-7.0, -12.5, -6.5 deg) on the three shortest round trips of the night (35.7, 22.3, 38.1 ms against a 55.2 ms median). Re-scored at 2.5 it is 28 GREAT / 1 MISS. Note the trip median fell mid-session — 55-79 ms before 23:07, 22-70 ms after — so this was another link shift, and a fixed lead cannot track it while the asymmetric bias degrades gracefully into Good when it happens.
+
+**Unverified:** the no-fire cost. A later target is a later deadline (~4.6 ms at 325 deg/s), and a re-score cannot see a fire it turns into a `NO PRESS`. Watch the `NO PRESS` count on the next match.
+
+**Fixed alongside it:** `rescore_policy.py` computed its bias delta against the *live* `AIM_BIAS_DEG` rather than the aim each fire was taken with, so editing the constant silently re-baselined the entire history and made the new value read as already-shipped. `autorun.py` now logs `aim_bias_deg` per fire the way it already logs `lead_ms`; older records fall back to `HISTORIC_BIAS_DEG = 1.0`, which git confirms was the value from 08-15 17:01, before the earliest landings file.
+
 **2026-08-20 (later): "Merciless Storm — deliberate abstention" was wrong. The bot presses on 17 of 17 revolutions.** The claim was true of the *tracker* and was recorded as if it were true of the *bot*. `replay_tracker.py` only exercises the predictive path, and `decide` returning `may_react=True` is not a decision not to press: `autorun.py:848` then fires reactively on the classifier's cue. Storm draws an unfilled outline, so `find_zone` returns None, `decide` returns `no zone drawn yet` with `may_react`, the classifier calls the frames `full black (great)`, and the key goes down. New tool: `tools/replay_centre_crop.py`, which replays the **live** decision path against a source video cropped the way the live grab crops.
 
 | clip | checks | tracker (`replay_tracker.py`) | **bot (`replay_centre_crop.py`)** |

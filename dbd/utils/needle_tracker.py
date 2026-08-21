@@ -149,7 +149,33 @@ GREAT_FALLBACK_DEG = 10.5  # measured; the simulator's default of 15 is 40% too 
 # Do not re-sweep this against replays. Replay error is ~1.0 deg sigma against 3.8 live, so
 # a replay sweep is measuring the wrong distribution — that is how the value got moved on
 # thin evidence twice. Re-score the `.jsonl` landings instead.
-AIM_BIAS_DEG = 1.0
+#
+# **2.5 on 2026-08-20, on 654 pooled armed fires, because Nico stated the preference the
+# earlier tallies were silently guessing at: a good beats a miss.** Every value above was
+# picked by maximising Great and treating good and MISS as the same kind of not-Great. They
+# are not. A good costs the bonus; a MISS costs 10% progress and screams. Once misses are
+# the thing being minimised the plateau argument above stops applying, because bias trades
+# along exactly the axis that separates them.
+#
+# Re-scored with `tools/rescore_policy.py` over every landings file, lead on the shipped
+# burst rule:
+#
+#     bias 1.0 (was shipped)  531 GREAT (81.2%)   98 good  25 MISS
+#     bias 2.0                506 GREAT (77.4%)  132 good  16 MISS
+#     bias 2.5                500 GREAT (76.5%)  142 good  12 MISS
+#
+# Misses halve for ~5 points of Great, and no session in the 22 gets worse on misses — 10
+# get better. The 2026-08-20 22:45 match that prompted this went 27G/3M -> 28G/1M, better on
+# both, and its three misses were the three shortest round trips of the night (35.7, 22.3,
+# 38.1 ms against a 55.2 ms median). Nothing has ever missed late, in 654 fires.
+#
+# 2.5 and not more because of the `great_width / 4` clamp in `decide`: on the usual 10 deg
+# Great that IS 2.5, so this is the largest bias that is actually applied rather than
+# clipped, and `rescore_policy.py`'s docstring is right that past the clamp the arithmetic
+# stops being able to grade itself. The residual unmeasured cost is the no-fire risk named
+# above — 1.5 deg later is ~4.6 ms later at 325 deg/s, well inside one 20-30 ms frame, but
+# a re-score cannot see a fire it turns into a no-fire. Watch `NO PRESS` counts.
+AIM_BIAS_DEG = 2.5
 
 
 @dataclass(frozen=True)
