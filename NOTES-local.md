@@ -48,7 +48,38 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 ## Resume here
 
-Read this section first; it is the state as of 2026-08-19.
+Read this section first; it is the state as of 2026-08-20.
+
+**2026-08-20 (evening): 45 ms is ruled out. The fast link did not hold, the fixed 60 ms stands, and 65 is a new untested candidate.** One armed match at `--round-trip-ms 45`, `landings-20260820-171452.jsonl`: 20 graded fires, 8 GREAT / 12 good / **0 MISS**. The operator's summary — "didn't miss any skill checks but also didn't get many Greats" — is one fact, not two.
+
+**Every fire landed late. Zero negative errors.** Mean +6.35 deg, median +6.25, sd 2.42, range +2.0 to +12.0. Trip median **61.0 ms** (mean 61.7, sd 7.3, range 48.2-78.1) — back inside the 52-68 ms band of the 17 sessions that preceded 20260819-194107.
+
+| sessions | trip median | error median |
+|---|---|---|
+| 20260816-204337 .. 20260819-174342 (17 sessions) | 52.2 - 67.5 ms | -1.5 to +3.5 deg |
+| 20260819-194107 (the fast one) | 41.7 ms | -2.50 deg |
+| **20260820-171452 (its sibling, lead 45)** | **61.0 ms** | **+6.25 deg** |
+
+**So the 41.7 ms session never got a sibling — it stays a single session, not a state the link can be in.** The whole outcome is the arithmetic of arming 16 ms short: 61 - 45 = 16 ms is 5.3 deg at ~330 deg/s, plus the 1.0 deg `AIM_BIAS_DEG`, which is +6.3 against an observed +6.35. Nothing missed because **late is the cheap direction** — Great sits at the leading edge, so a late press spills into Good while an early one misses outright.
+
+Rescoring the same 20 landing angles at other leads, with the asymmetric miss criterion (early cliff at about -5.5 deg, late edge past +42):
+
+| lead | mean error | GREAT | good | worst early | MISS |
+|---|---|---|---|---|---|
+| 45 (as run) | +6.35 | 8/20 (40%) | 12 | +2.0 | 0 |
+| 55 | +3.16 | 15/20 (75%) | 4 | -1.1 | 0 |
+| **60 (default)** | **+1.56** | **17/20 (85%)** | 2 | -2.7 | 0 |
+| 65 | -0.03 | 19/20 (95%) | 0 | -4.2 | 0 |
+| 70 | -1.63 | 18/20 (90%) | 0 | -5.8 | **1 early** |
+
+**No code changed: `ROUND_TRIP_MS` was 60.0 throughout and the 45 was a CLI override only.** The burst rule was also inert and is untouched — the fastest trip of the session was 48.2 ms and the override only arms in the 20-40 ms window, so it never fired. Yesterday's expectation that arming at 45 would make the override inert was right, but for the other reason: the link was slow, not that `min(45, 45)` collapsed.
+
+**65 ms is a candidate, not a finding.** It scores best on this sample, but it is one 20-fire session — the same sample size and the same reasoning that produced the *wrong* 45 ms recommendation the night before — and its early margin is 1.3 deg against a cliff that misses outright. 60 is preferred because it has two independent supports that agree: this rescore predicts 85%, and 60 already delivered 91% Great live (13/16, 3.26 deg sd). Do not promote 65 to a constant without its own session, and note that at 70 the first early miss appears, so the ceiling is real.
+
+**The circularity trap applies to this entry too, and the entry survives it.** `round_trip_ms` is back-computed from the settled angle through the fit (`time_to_angle(fit, settled, press_ms)`), so it and `error_deg` are one observation in two units — the residual `error - (trip - lead) * rate` came out at +1.00 deg with sd **0.01**, which is a tautology restating `AIM_BIAS_DEG`, not a clean model. The load-bearing measurements are the 20 settled angles and the independently-fitted rate (1.6-2.6 deg RMS over 11-37 frames). The rescore additionally assumes the link would have cost the same at a different lead; that is the standard assumption here, not a proven one.
+
+**`record_frames.py` cannot run alongside an armed match at all — the staged "15 fps to halve contention" plan is dead.** The first attempt at this session (23:38, 2026-08-19) armed correctly and then starved: 14 frames over ~7 focused minutes, 0 fps, no skill check ever seen, and no landings log written. It was not the bot yielding to the recorder — both died. The recorder's own manifest ran 13.6 fps for 0.9 s and then flatlined to **exactly one frame every 30.0 s**, and a lone 224 px `mss.grab()` measured with one other capture client live took **30.1 seconds**, four grabs exceeding a two-minute timeout. Two concurrent `mss` clients on macOS 26.6 mutually starve on a ~30 s timeout. Record frames or arm the bot, one per session — and the Madness-check gap that the recorder was meant to cover stays open. The 23:49 restart with no recorder ran clean, as did this session: 41 fps, 3585 frames.
+
 
 **2026-08-19 (evening): the link shifted BETWEEN sessions for the first time, ~20 ms below the band every prior session occupied. Untested fix staged, not yet run.** The operator reported the mechanism landing early "mostly", across this game and earlier ones. It is not the aim and not the model. Per-session medians over all 18 landings logs:
 
