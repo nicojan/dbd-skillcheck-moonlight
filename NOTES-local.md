@@ -54,8 +54,10 @@ Read this section first; it is the state as of 2026-08-20.
 
 | clip | checks | tracker (`replay_tracker.py`) | **bot (`replay_centre_crop.py`)** |
 |---|---|---|---|
-| `merciless-storm` (17 revolutions, no Doctor) | 17 | abstains on all | **presses on all 17**, every one reactive |
-| `merciless-storm-madness2` (Doctor + Storm) | 13 | abstains on all | **presses on 8**, 7 reactive and 1 predictive |
+| `merciless-storm` (17 revolutions, no Doctor, 720p source) | 17 | abstains on all | **presses on all 17**, every one reactive |
+| `merciless-storm-madness2` (Doctor + Storm, native 1080p) | 13 | abstains on all | **presses on 8** — 6 of its 9 centred checks, plus 2 Madness false positives |
+
+Take the native-1080p clip as the authority. The 720p clip has to be upscaled to reach training geometry, and the two ways of doing it disagree: cropping 149 px and resizing up (this tool) calls 3-8 frames per revolution `full black (great)`, while rescaling the whole frame first (`ingest_video.py`, whose manifests are on disk) calls 0-1. The count is resize-sensitive; the conclusion is not, because the native clip presses on 6 of 9 centred revolutions with no resize in the path at all.
 
 **Whether those presses land is still unmeasured, and that is now the open question rather than a curiosity.** A reactive press carries no lead at all, so it lands the whole round trip late — ~60 ms of link plus ~24 ms of frame age at ~300 deg/s is about **25 deg past where the model saw the needle**. Storm's success zone has never been measured because it draws no solid band (`measure_zone.py` reports `great = 0.0` on every Storm frame), so there is no way yet to say whether 25 deg late is a hit or an explosion. Storm demands consecutive hits and the bot does fire about once per revolution, so the design comment's "beats not pressing at all" may well be right — it has simply never been checked.
 
@@ -63,18 +65,26 @@ Read this section first; it is the state as of 2026-08-20.
 
 | off-centre | what the armed loop does |
 |---|---|
-| 148.6 px | classifier sees no check at all, 0 of 68 frames a hit class — **no press** |
-| 93.9 px | **FIRE predictive**, aiming 305.5 deg |
-| 84.2 px | HIT reactive |
-| 178.2 px | HIT reactive, on 2 frames, with the ring essentially outside the crop |
+| 148.6 px | classifier sees no check at all, 48 of 68 frames `None` — **no press** |
+| 93.9 px | no press (3 frames read `full black (great)`, none while the tracker was standing down) |
+| 84.2 px | **HIT reactive**, on 1 frame |
+| 178.2 px | **HIT reactive**, on 1 frame, with the ring entirely outside the crop |
 
-The 93.9 px case is the one that matters: a fully aimed predictive press, timed off `needle_angle` measured about the **crop** centre rather than the ring centre. That is the wrong-centre trap already documented for `scan_frames.py`, except it fires live instead of mismeasuring offline — an arbitrary press time wearing the costume of an aimed one. The 178.2 px case is a false positive: the ring spans 113-243 px from centre so nothing check-like is in the crop, and two frames still classified `full black (great)`. Same family as the loadout-menu perk icon at 1.000 confidence, and again what protects us is class assignment rather than confidence.
+So the Madness hazard is not an aimed press — it is a **single-frame false positive**. At 178.2 px the ring spans 113-243 px from centre, nothing check-like is inside the crop at all, and one frame still classified `full black (great)`, which is all the reactive path needs. Same family as the loadout-menu perk icon at 1.000 confidence, and again what protects us is class assignment rather than confidence. The consequence is mild — a stray space bar on a check you were going to take manually — but it is not zero, and it is the same mechanism that would fire in a menu if a hit class ever came up there.
+
+**A first version of this entry reported the 93.9 px check as a full predictive fire aiming 305.5 deg, and that was an artifact of the tool being 10 px mis-framed. See below.** It is the second confident wrong answer this tooling produced in one session.
 
 **The obvious mitigation does not work.** Requiring two consecutive hit-class frames before a reactive press was measured against both clips: the 178 px false positive has a run of 2, and 7 of the 17 genuine Storm revolutions also peak at 2. The gate cannot separate them.
 
 **What this evidence cannot say.** The only Madness footage in the repo is `merciless-storm-madness2.mp4`, so **every off-centre check testable here is also a Merciless Storm check** — the `full black` rendering and the missing zone are Storm's, not Doctor's. Off-centre behaviour on a normal `repair-heal` check is untested, and no footage of one exists. n = 1 clip for all of it.
 
 **The open design choice, unresolved:** suppress the reactive fallback when no zone is drawn — making Storm a true abstention, which is what this file claimed for five days — or keep it and accept presses whose landing nobody has measured. Measuring Storm's zone off the outline arc is what would settle it, and is the cheaper of the two paths to an answer.
+
+**Our live crop is framed 10 px differently from every downloaded clip, and that 10 px changes the classifier's answer.** Measured on our own recordings, the ring sits at **(111.25, 101.75)** with a quarter pixel of scatter across ten checks — 10 px above the crop centre, which is where the `(112, 102)` constant in `record_checks.py` and `ingest_video.py` comes from. Both downloaded clips draw a *centred* check at the frame's geometric centre instead. So cropping a clip's geometric centre puts the ring at (112, 112) and shows the model a framing the live bot never produces, and on the Madness checks that alone turned a no-press into a confident aimed fire. `replay_centre_crop.py` now shifts the crop by `RING_ABOVE_CENTRE_PX` and keeps it a fixed box, so a centred check lands where live puts it and an off-centre one is displaced within it rather than re-centred.
+
+**Which side of that 10 px is the anomaly is not settled, and it is worth settling.** Either DBD draws the check 10 px high and both clips were cropped or rescaled on their way to us, or our `content_rect` frames the stream 10 px low — in which case every frame the model has ever classified live has been shifted 10 px against its training data, which is a quiet systematic error in the one input everything else depends on. n = 2 clips, both re-encoded by a third party, so the clips are the weaker evidence. `calibrate_window.py` against a real check would settle it directly.
+
+**Storm's zone IS measurable after all, and the first read says the reactive press does not land.** `measure_zone.py` reports `great = 0.0` on Storm because there is no solid fill, but the *outline* gives the success zone: 11 of 17 revolutions measured, **total zone median 23.0 deg, range 8.5-39.5** (against `successZoneSize` 50 for a normal check). A reactive press carries no lead, so it lands round trip plus frame age late — ~84 ms at ~300 deg/s is **~25 deg**, which is wider than the median zone. On the one revolution where the ingested manifest has a hit-class frame to key off, the press lands at 142-150 deg against a 108-132 deg zone: **outside, in both the 60 ms and 84 ms cases.** That is n = 1 and it leans on the ingest manifests rather than a faithful crop, so it is a direction, not a verdict — but the direction is that Storm presses miss, which argues for suppressing the fallback rather than keeping it.
 
 
 **2026-08-20 (evening): 45 ms is ruled out. The fast link did not hold, the fixed 60 ms stands, and 65 is a new untested candidate.** One armed match at `--round-trip-ms 45`, `landings-20260820-171452.jsonl`: 20 graded fires, 8 GREAT / 12 good / **0 MISS**. The operator's summary — "didn't miss any skill checks but also didn't get many Greats" — is one fact, not two.

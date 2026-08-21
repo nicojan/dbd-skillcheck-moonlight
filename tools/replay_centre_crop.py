@@ -26,6 +26,21 @@ WHETHER and WHERE the bot commits, not how well the press lands. Grading a Merci
 press needs a zone this repo cannot yet measure; see NOTES "What third-party recordings
 settled".
 
+**The crop is not the frame's geometric centre, and getting that wrong inverts the answer.**
+Our own live recordings put the ring at (111.25, 101.75) with a quarter pixel of scatter
+across ten checks — 10 px ABOVE the crop centre, which is where the `(112, 102)` constant in
+`record_checks.py` and `ingest_video.py` comes from. The downloaded clips draw a centred
+check at the frame centre instead, so cropping the geometric centre lands the ring at
+(112, 112) and shows the model a framing the live bot never produces. Ten pixels changes the
+classification wholesale: geometric-centre crops of `merciless-storm.mp4` call 3-8 frames per
+revolution `full black (great)`, correctly framed crops call 0-1. The crop is therefore
+offset by `RING_ABOVE_CENTRE_PX` so a centred check lands where live puts it, and it stays a
+FIXED box so an off-centre Madness check is displaced within it rather than re-centred.
+
+Whether the 10 px is DBD drawing the check high or our `content_rect` framing 10 px low is
+not settled here; either way it is what the live grab sees, and the live grab is the thing
+being reproduced.
+
 The crop scales with frame height the way the live grab does, so a 720p clip is cropped at
 149 px and resized to 224 rather than being cropped at 224 and silently framed wrong.
 `events.json`'s `size` is the ingest target, NOT the source resolution — read it from the
@@ -50,20 +65,21 @@ from dbd.utils.needle_tracker import ROUND_TRIP_MS, TrackerState, decide, mark_f
 
 TRACKED_PREDS = (1, 2, 3, 4, 5, 6, 7)  # keep in step with autorun.py
 CROP = int(TRAINING_REFERENCE_CROP)  # the constant is a float, and cv2.resize wants ints
+RING_ABOVE_CENTRE_PX = 10.0  # measured live: ring at y=101.75 in a 224 crop, not 112
 
 
-def centre_crop(bgr, side):
+def centre_crop(bgr, side, offset_y):
     """The region the live grab would take, resized to training size if the stream is not 1080p."""
 
     h, w = bgr.shape[:2]
-    y0, x0 = h // 2 - side // 2, w // 2 - side // 2
+    y0, x0 = h // 2 - side // 2 + offset_y, w // 2 - side // 2
     crop = bgr[y0:y0 + side, x0:x0 + side]
     if side != CROP:
         crop = cv2.resize(crop, (CROP,) * 2, interpolation=cv2.INTER_CUBIC)
     return crop
 
 
-def replay_check(model, cap, check, fps, side, step, lead_ms):
+def replay_check(model, cap, check, fps, side, step, lead_ms, offset_y):
     """What the armed loop would do on one check. Returns (action, prediction counts)."""
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, check["frame0"])
@@ -77,7 +93,7 @@ def replay_check(model, cap, check, fps, side, step, lead_ms):
             continue
 
         t_ms = (i - check["frame0"]) / fps * 1000.0
-        crop = centre_crop(bgr, side)
+        crop = centre_crop(bgr, side, offset_y)
         pred, desc, _, should_hit = model.predict(crop[:, :, ::-1])  # predict wants RGB
         preds.append(desc)
 
@@ -106,6 +122,10 @@ def main():
     p.add_argument("--model", default="models/model.onnx")
     p.add_argument("--threads", type=int, default=4)
     p.add_argument("--round-trip-ms", type=float, default=ROUND_TRIP_MS)
+    p.add_argument("--ring-above-centre", type=float, default=RING_ABOVE_CENTRE_PX,
+                   help="px a centred check's ring sits above the live crop centre; the crop "
+                        "is shifted down by this so the clip is framed as live frames it. "
+                        "0 crops the frame's geometric centre, which is NOT what live sees")
     p.add_argument("--fps", type=float, default=0.0,
                    help="feed frames at about this rate; 0 uses every frame. The live loop "
                         "runs at 33-41 fps, so a 60 fps clip fed whole gives the tracker "
@@ -119,11 +139,14 @@ def main():
 
     width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = events["fps"]
-    side = max(8, int(round(TRAINING_REFERENCE_CROP * height / TRAINING_REFERENCE_HEIGHT)))
+    scale = height / TRAINING_REFERENCE_HEIGHT
+    side = max(8, int(round(TRAINING_REFERENCE_CROP * scale)))
+    offset_y = int(round(args.ring_above_centre * scale))
     step = 1 if args.fps <= 0 else max(1, round(fps / args.fps))
 
     print(f"{events['video']}  {width}x{height} @{fps:.1f}  centre crop {side} px -> "
-          f"{CROP}  feeding {fps / step:.0f} fps  lead {args.round_trip_ms:.0f} ms")
+          f"{CROP}  crop shifted {offset_y:+d} px  feeding {fps / step:.0f} fps  "
+          f"lead {args.round_trip_ms:.0f} ms")
 
     model = AI_model(model_path=args.model, use_gpu=False,
                      nb_cpu_threads=args.threads, monitoring=None)
@@ -131,7 +154,8 @@ def main():
 
     pressed = 0
     for check in events["checks"]:
-        action, preds = replay_check(model, cap, check, fps, side, step, args.round_trip_ms)
+        action, preds = replay_check(model, cap, check, fps, side, step,
+                                     args.round_trip_ms, offset_y)
         pressed += action != "NO PRESS"
         top = ", ".join(f"{d} x{n}" for d, n in Counter(preds).most_common(3))
         print(f"{check['dir']}  off {check['off_px']:5.1f} px  "
