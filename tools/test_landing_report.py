@@ -605,8 +605,8 @@ def test_the_lead_level_follows_the_link_and_the_burst_rule_still_runs_on_top():
 
     Why it exists: `--round-trip-ms` was pinned at 60 because that is what the link
     measured for the first five days on record, and it then drifted to a per-session median
-    of 37 without anything noticing. 2026-08-24 fired 32 checks with a first-half median
-    trip of 38 and a second-half median of 37 — a level, not a burst — and scored 5 MISS in
+    of 38 without anything noticing. 2026-08-24 fired 32 checks whose first-half median
+    trip was 38 ms against the second half's 37 — a level, not a burst — and scored 5 MISS in
     21 gradeable fires, more than the 25 sessions before it managed between them.
 
     Re-scored over all 864 gradeable fires: the burst rule alone gives 671 Great / 19 MISS,

@@ -171,9 +171,12 @@ BURST_TRIP_FLOOR_MS = 20.0
 # `--round-trip-ms` defaults to 60 because that is what the link measured in August, and
 # for five days it was right. It then drifted and nothing in here noticed. Per-session
 # median round trip, in order:
-# 57 61 55 59 62 60 61 62 64 61 68 52 62 63 62 66 60 42 61 61 66 55 52 56 49 37.
-# The last five run 55, 52, 56, 49, 37, and on 24-08 every one of 32 fires came back fast
-# (first-half median 38, second-half 37 — a level, not a burst). Against a 60 ms lead that
+# 57 61 55 59 62 60 60 62 64 61 68 52 61 63 63 66 58 33 61 61 66 52 51 55 48 38
+# — which `tools/rescore_policy.py` now prints itself, and did not before, which is most
+# of why five sessions of drift went unnoticed.
+# The last five run 52, 51, 55, 48, 38, and on 24-08 every one of 32 fires came back fast
+# (over all of them, gradeable or not, the first half medians 38 ms against the second
+# half's 37 — a level, not a burst). Against a 60 ms lead that
 # presses ~23 ms early, 7.5 deg at 325 deg/s, and the Great band has no early margin: that
 # session scored 13 Great / 5 MISS in 21 gradeable fires, more misses in one night than the
 # 25 sessions before it managed between them.

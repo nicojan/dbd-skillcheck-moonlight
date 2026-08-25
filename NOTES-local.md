@@ -37,6 +37,8 @@ Working: window targeting, focus gating, detection, key delivery through Moonlig
 
 **Updated 2026-08-20 (close-out).** The lead is still fixed at 60 ms and the burst exception is unchanged. All-time over 21 landings logs: **630 gradeable fires, 502 Great (80%), 100 good, 28 miss** — counting every fire with a numeric `error_deg` and a Great/good/MISS verdict. The rate fell from 83% because of two sessions and for two understood reasons, neither of them a regression: `20260819-194107` went 5/10 with **5 misses** on a 32.7 ms trip median (the fast-link session), and `20260820-171452` went 8/20 with **12 goods and no misses** because it was deliberately armed 16 ms short at 45. Excluding those two the record is 600 fires at **82% Great**.
 
+**Updated 2026-08-24. The 60 ms constant went stale, and the lead now tracks the link's level.** The measured round trip has been falling for a week and nothing in the bot noticed. Per-session median trip over gradeable fires, in order over all 26 landings logs (`tools/rescore_policy.py` prints this table itself now): 57 61 55 59 62 60 60 62 64 61 68 52 61 63 63 66 58 33 61 61 66 52 51 55 48 **38**. On 24-08 every one of 32 fires came back fast — first half median 38 ms against second half 37 over all 32 fires, a *level* rather than a burst — so every press went ~23 ms early, 7.5 deg at 325 deg/s, into a Great band with no early margin. That session took **5 MISS in 21 gradeable fires**, more than the 25 sessions before it managed between them. `lead_level_ms` (shipped `daf7940`) now uses the clamped median of the last 9 measured trips as the base lead, but only when it disagrees with the constant by more than 15 ms; the burst rule still runs on top. All-time over 26 logs: **864 gradeable fires**, re-scored at 664 Great (76.9%) / 189 good / 11 MISS under the shipped policy. See the top of *Resume here*.
+
 **A third session supports 60 ms.** `landings-20260820-192920.jsonl`, 9 fires at lead 60, 5 gradeable: **4 GREAT, 1 good, 0 MISS**, errors +8.0 / +5.0 / +3.0 / +0.5 / -3.0, trip median 66.2. Small, but it lands the same way the rescore predicted and it is mildly late (mean +2.7), which is the direction that makes 65 ms worth its own session rather than a worse idea. It also carries **4 `no press` outcomes in 9 fires**, which is the other open question — whether those drops are the operator's own space bar — and n is far too small to read anything into it.
 
 **Which Moonlight leg holds the 11 ms is the one open question, and it decides step 8 (2026-08-17).** Replaying recorded checks uses the recordings' real capture timestamps, so live frame-arrival jitter is included and only the *input* path is absent — and it scores **sigma ~1.0 deg** against **3.8 deg** live. So ~3.7 deg / 11 ms arises between deciding and the needle stopping, and it is not our fitting. By elimination that is the input leg, which is what the deferred host-side `SendInput` agent addresses — but it is elimination, not measurement, and `tail_read` cannot close it (see the finding below). Two cheap discriminators, one match each, in order:
@@ -52,7 +54,37 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 ## Resume here
 
-Read this section first; it is the state as of 2026-08-20.
+Read this section first; it is the state as of 2026-08-24.
+
+**2026-08-24 (20:30): the lead follows the link's level now, because a constant measured on 16-08 stopped describing the link.** Nico played two matches and said the bot was missing checks. Every miss in the log landed **early**, and every one was fired at the 60 ms lead.
+
+The round trip has been drifting down for a week. Per-session median over gradeable fires, in order across all 26 landings logs — `tools/rescore_policy.py` prints this table itself now, which it did not before, which is why nothing caught the drift:
+
+```
+57 61 55 59 62 60 60 62 64 61 68 52 61 63 63 66 58 33 61 61 66 52 51 55 48 38
+```
+
+The last five run 52, 51, 55, 48, **38**. And 24-08 is not the fast-link *burst* the `BURST_TRIP_MS` rule was built for: all 32 fires came back fast — over every fire, gradeable or not, the first half medians 38 ms against the second half's 37. A level, held all night. Against a 60 ms lead that is a press ~23 ms early — 7.5 deg at 325 deg/s — into a band whose leading edge has no early margin at all. The session scored **13 GREAT / 3 good / 5 MISS** in 21 gradeable fires; the 25 sessions before it hold 19 misses between them. Setting the lead to that session's own median trip removes **all five** (13G/5M -> 16G/0M), which is what says the aim was never the problem.
+
+`lead_level_ms` in `tools/autorun.py` takes the clamped median of the last `LEVEL_WINDOW` = 9 measured round trips and uses it as the base lead — **but only when it disagrees with the constant by more than `LEVEL_DEADBAND_MS` = 15 ms.** `lead_for_check` still runs on top of whatever it returns.
+
+**The deadband is the rule, and the first version did not have one.** Following the level continuously also follows a session that sat at 52 or 63, which is inside the plateau the fixed lead already handles, and it cost 23 Greats to buy the same 8 misses. With the deadband the rule is dormant on 20 of the 26 sessions and touches only the six whose link genuinely moved — adding a miss to none of them. Same shape as the burst rule: catch the departure, leave the plateau alone.
+
+Re-scored over all 864 gradeable fires (`tools/rescore_policy.py`, which now calls the real policy rather than a copy of it):
+
+| lead policy | GREAT | good | MISS |
+|---|---|---|---|
+| fixed 60 ms | 665 (77.0%) | 165 | 34 |
+| burst rule alone | 671 (77.7%) | 174 | 19 |
+| **link level + burst (shipped)** | **664 (76.9%)** | **189** | **11** |
+
+Seven Greats for eight misses — the same trade `AIM_BIAS_DEG` took on 08-20. It is better on **both regimes taken separately**: 11 -> 7 misses over the 594 fires before 20-08, 8 -> 4 over the 270 after, so it is not one night's artifact. Window 7-15 and deadband 12-18 all land between 9 and 11 misses at 76-77.5% Great; the clamp floor is inert anywhere from 25 to 35 and only bounds how far a run of broken readings could drag the aim. The aim bias re-sweeps unchanged under the new lead — 2.5 is still the miss-minimising value.
+
+**A median, not a mean, and that is load-bearing.** A burst is *meant* to fall through this rule to `lead_for_check`, which is the thing that catches it. Three fast readings inside a nine-wide window do not move the median at all. A mean would half-follow the burst here and leave the burst rule nothing to catch — which is the shape of the four rejected smooth-adaptation attempts, and the reason this one is not a fifth: it targets the *level*, and explicitly refuses to chase anything smaller than 15 ms.
+
+**Unverified: it has never been played.** The next armed session should log `lead: 60 -> 38 ms for this check — link level over 9 trips` once it has three measured trips in hand. Two things to watch: whether the misses actually stop (predicted ~2 rather than 5 on a link this fast, still too few to read from one night), and the `NO PRESS` count — a shorter lead fires later in the sweep, which should give *more* deadline slack rather than less, but that is reasoning and not evidence.
+
+**What this does not settle.** Why the link got faster is unknown and unasked — nothing on this side changed. If it can fall 60 -> 38 in five sessions it can climb back, and the rule is symmetric, so that is not a reason to chase it. The 65 ms candidate below is now moot: it was a constant proposed for a link that no longer exists.
 
 **2026-08-20 (23:45): aim bias 1.0 -> 2.5 deg, because the objective was wrong, not the tuning.** Nico asked for good over miss. Every earlier bias decision maximised Great and treated `good` and `MISS` as the same kind of not-Great; they are not, and the bias trades along exactly the axis that separates them. The Great band sits at the *leading* edge of a ~49 deg success zone, so a late press spills into ~38 deg of Good and an early one misses outright — in 654 recorded fires **nothing has ever missed late**.
 
@@ -134,7 +166,7 @@ Rescoring the same 20 landing angles at other leads, with the asymmetric miss cr
 
 **No code changed: `ROUND_TRIP_MS` was 60.0 throughout and the 45 was a CLI override only.** The burst rule was also inert and is untouched — the fastest trip of the session was 48.2 ms and the override only arms in the 20-40 ms window, so it never fired. Yesterday's expectation that arming at 45 would make the override inert was right, but for the other reason: the link was slow, not that `min(45, 45)` collapsed.
 
-**65 ms is a candidate, not a finding.** It scores best on this sample, but it is one 20-fire session — the same sample size and the same reasoning that produced the *wrong* 45 ms recommendation the night before — and its early margin is 1.3 deg against a cliff that misses outright. 60 is preferred because it has two independent supports that agree: this rescore predicts 85%, and 60 already delivered 91% Great live (13/16, 3.26 deg sd). Do not promote 65 to a constant without its own session, and note that at 70 the first early miss appears, so the ceiling is real.
+**65 ms is a candidate, not a finding.** *(Moot 2026-08-24 — it was a constant proposed for a link that has since moved to a 38 ms median. The lead now tracks the level instead.)* It scores best on this sample, but it is one 20-fire session — the same sample size and the same reasoning that produced the *wrong* 45 ms recommendation the night before — and its early margin is 1.3 deg against a cliff that misses outright. 60 is preferred because it has two independent supports that agree: this rescore predicts 85%, and 60 already delivered 91% Great live (13/16, 3.26 deg sd). Do not promote 65 to a constant without its own session, and note that at 70 the first early miss appears, so the ceiling is real.
 
 **The circularity trap applies to this entry too, and the entry survives it.** `round_trip_ms` is back-computed from the settled angle through the fit (`time_to_angle(fit, settled, press_ms)`), so it and `error_deg` are one observation in two units — the residual `error - (trip - lead) * rate` came out at +1.00 deg with sd **0.01**, which is a tautology restating `AIM_BIAS_DEG`, not a clean model. The load-bearing measurements are the 20 settled angles and the independently-fitted rate (1.6-2.6 deg RMS over 11-37 frames). The rescore additionally assumes the link would have cost the same at a different lead; that is the standard assumption here, not a proven one.
 
@@ -166,7 +198,7 @@ Perfect separation on the 10 graded fires (Fisher p ~ 0.004). **The burst rule w
 **A measurement trap, and `read_landings.py` already documents it.** `round_trip_ms` is derived from the settled angle through the fit — `round_trip = lead - overshoot + error/rate` — so it and `error_deg` are one observation in two units. Correlating them looks like overwhelming confirmation (r = 0.996 across 659 fires) and confirms nothing. The per-session comparison above avoids this only because it contrasts *different sessions* rather than two fields of one record.
 
 
-**2026-08-18 (evening): the link does not drift, it DROPS — and that is the one thing worth following.** Three previous attempts to follow the link all failed because they followed it *smoothly*. In 3 of 15 logged sessions the measured round trip halves to 31-35 ms, holds for a run of checks, then returns. Those runs are ~4% of fires and a third of every miss on record: a 33 ms trip against a 60 ms lead presses 27 ms early, 9 deg at 330 deg/s, and the Great band's leading edge has no early margin. Per session the correspondence is nearly one-for-one:
+**2026-08-18 (evening): the link does not drift, it DROPS — and that is the one thing worth following.** *(Half superseded 2026-08-24: the drops are real and the burst rule still ships, but the link does ALSO drift — its per-session median fell ~60 -> 38 ms over five sessions. The claim was true of everything visible on 08-18 and false a week later. See the top of `Resume here`.)* Three previous attempts to follow the link all failed because they followed it *smoothly*. In 3 of 15 logged sessions the measured round trip halves to 31-35 ms, holds for a run of checks, then returns. Those runs are ~4% of fires and a third of every miss on record: a 33 ms trip against a 60 ms lead presses 27 ms early, 9 deg at 330 deg/s, and the Great band's leading edge has no early margin. Per session the correspondence is nearly one-for-one:
 
 | session | fires | MISS | trips <40 ms |
 |---|---|---|---|
@@ -203,7 +235,7 @@ Perfect separation on the 10 graded fires (Fisher p ~ 0.004). **The burst rule w
 
 This is the shape the offline simulation predicted and the reason to trust it: the Great rate barely moves (83 -> 84%), because the adaptation was never wrong about the *centre*. What it was doing was widening the distribution, and the tail is where that showed — sigma 5.9 -> 3.7 deg, and ten misses to none. The best single match on record is `landings-20260817-205948.jsonl`: **47 fires, 42 Great, 5 good, zero MISS, sigma 3.3, no dropped checks.** Treat the zero-MISS figure with the caution 85 draws deserve; the sigma is the sturdier half of the claim.
 
-**Leave the lead at 60.** Re-scored over all 294 gradeable fires it is still flat: 60 -> 82%, 62 -> 83%, 64 -> 84%, 66 -> 80%. Every session today ran late (+1.4 to +5.1 deg at a fixed 60) and every session yesterday ran early (-0.78, -0.55), so the offset is day-to-day, not a constant waiting to be corrected. Four checks across a 6 ms range is not evidence.
+**Leave the lead at 60.** *(Superseded 2026-08-24: still the right base, but no longer the whole policy — see the top of `Resume here`.)* Re-scored over all 294 gradeable fires it is still flat: 60 -> 82%, 62 -> 83%, 64 -> 84%, 66 -> 80%. Every session today ran late (+1.4 to +5.1 deg at a fixed 60) and every session yesterday ran early (-0.78, -0.55), so the offset is day-to-day, not a constant waiting to be corrected. Four checks across a 6 ms range is not evidence.
 
 **The no-press records paid for themselves on the first night.** Three dropped checks across the four matches — 97% of tracked checks fired — and the raw series settles what the log line never could. Both `fit too poor` drops are the same event, and it is not a bad fit:
 
@@ -698,7 +730,12 @@ The relationship worth keeping in mind: `hit window (ms) = Great band angular wi
 
 - **Settle the 10 px framing question, before anything else here.** Our recordings put the ring at (111.25, 101.75) in a 224 crop; both downloaded clips draw a centred check at the frame's geometric centre. If the anomaly is ours rather than theirs, every frame the model has classified live is shifted 10 px against its training data — a quiet systematic error under everything else in this file. `tools/calibrate_window.py` against a real check settles it in one match, and it is the highest-value item on this list precisely because it is upstream of all the others.
 - **Decide the Merciless Storm fallback.** Suppress the reactive press when no zone is drawn, making Storm a true abstention, or keep it. The first read favours suppressing: Storm's outline gives a total zone of median 23.0 deg, and a lead-less reactive press lands ~25 deg late, which is wider than the zone. That read is n = 1 and keys off the ingest manifests rather than a faithful crop, so grade a few revolutions properly with `tools/replay_centre_crop.py` plus `measure_zone.py` before changing behaviour.
-- **One match at `--round-trip-ms 65`.** The 2026-08-20 rescore puts it at 95% Great against 60's 85%, and the small 19:29 session at 60 came in late again (mean +2.7), which points the same way. It stays a candidate rather than a constant until it has its own session — 65's early margin is only 1.3 deg, and one 20-fire session is exactly the sample size that produced the wrong 45 ms answer.
+- ~~**One match at `--round-trip-ms 65`.**~~ **Dropped 2026-08-24.** It was a constant proposed for a link whose median has since fallen to 38 ms. `lead_level_ms` now tracks the level, which is the general form of the same idea.
+
+**Added 2026-08-24.**
+
+- **Play one match on the shipped `lead_level_ms` and read the `lead:` lines.** It has never been armed. Expect `lead: 60 -> 38 ms for this check — link level over 9 trips` once three trips are in hand, and check two things: whether the misses stop (predicted ~2 rather than 5 on a link this fast — too few to read from one night, so it needs two or three matches), and whether `NO PRESS` climbs. A shorter lead fires *later* in the sweep and should give more deadline slack, not less, but that is reasoning rather than measurement.
+- **Watch whether the link climbs back.** Nothing on this side changed, and nothing explains why the round trip fell 60 -> 38 over five sessions. The rule is symmetric so a return costs nothing, but a link that moves on its own is worth knowing about — `tools/rescore_policy.py` prints the per-session trip median every time it runs.
 
 1. **Moonlight/host latency settings** (user, in progress) — wired connection, host game V-Sync off, Moonlight frame-pacing/V-Sync off, GPU low-latency mode. Highest value per effort. Re-run `tools/measure_latency.py` afterwards to quantify.
 

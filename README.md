@@ -8,7 +8,9 @@ It began as a measurement rig, because the reason repair and heal checks never l
 
 ## Status
 
-Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks — verified armed, over eleven real matches on 2026-08-16 and 2026-08-17**: 297 gradeable fires, **246 Great (83%)**, 41 good, 10 miss, and every press accounted for. The lead is a fixed 60 ms; on the four matches since it stopped adapting (85 fires) the record is **84% Great, zero miss, spread 3.7 deg against 5.9 before**.
+Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks — verified armed, over twenty-six real matches between 2026-08-16 and 2026-08-24**: 864 gradeable fires, re-scored under the shipped policy at **664 Great (77%)**, 189 good, 11 miss, and every press accounted for.
+
+The lead starts at 60 ms and follows the link from there. Two rules sit on top of the constant, both in `tools/autorun.py` and both re-derivable with `tools/rescore_policy.py`: a round trip under 40 ms shortens the *next* check to 45 (the link drops in bursts), and the clamped median of the last 9 measured trips replaces the constant outright when it disagrees by more than 15 ms (the link also drifts — its per-session median fell from ~60 ms to 38 over the week to 2026-08-24, which cost a night of misses before anything noticed).
 
 **No presses are being lost.** An earlier version of this section claimed about a quarter never reached the game. That was wrong, and it was our own instrument: the freeze watch judged the tail of everything it saw against an absolute brightness floor, while the stray red left behind by a cleared check clears that floor. A landing that froze and then cleared inside the watch window therefore reported `still sweeping` — the same line a genuinely lost press produces. Once the watch was fixed to judge the contiguous lit block against the check's own peak, **32 of 32 fires in the next match produced a readable landing**, and 33 more since. There was never a delivery problem.
 
@@ -49,11 +51,11 @@ For scale, the same code can grade the *player's* presses, because a hit freezes
 
 Ten scorable human presses: **4 Great, 6 good, and every single one late**, median 9.0 deg past the centre of the band. That is the arriving-late diagnosis measured directly, without reference to any latency figure.
 
-What it *is* sensitive to is the round-trip constant. Mis-state it by 10 ms and Greats fall to 11 of 15; by 20 ms and they fall to 2. The default is now **60 ms**, and the armed loop measures its own round trip per check and adapts the lead toward it, so the constant matters mainly at the start of a session.
+What it *is* sensitive to is the round-trip constant. Mis-state it by 10 ms and Greats fall to 11 of 15; by 20 ms and they fall to 2. The default is **60 ms** — but the armed loop measures its own round trip on every check and will move off the constant when the link has plainly moved, so it matters mainly for the first few checks of a session.
 
 **Do not trust `measure_latency.py` over the armed number.** It presses at a text field on the host, in its own process, with the detector not running — it reported 126.5 ms on the same evening the armed loop was landing at 59. Every predictive fire logs `round trip NNN ms measured`, which is the closed-loop figure under real load against the game itself. Prefer it whenever the two disagree.
 
-The two directions of error are not symmetric — Great sits at the leading edge of the success zone, so firing late spills into Good while firing early misses the zone entirely. The aim therefore used to sit one degree late on purpose. **It no longer does**: that bias was swept against zero-jitter replays, and the first match to record per-check landings came back a mean +1.3 degrees *late* already, so the margin was being bought on the side that was not failing. At zero the aim is centred — mean landing error **−0.41 deg ±0.88 over 33 fires**, against +1.30 ±0.95 before.
+The two directions of error are not symmetric — Great sits at the leading edge of the success zone, so firing late spills into ~38 degrees of Good while firing early misses the zone entirely. In 864 recorded fires **nothing has ever missed late.** `AIM_BIAS_DEG` therefore aims **2.5 degrees late on purpose** (2026-08-20), which is the ceiling `decide` will apply — it clamps to `great_width / 4`. That buys roughly five points of Great and halves the misses, and it is a deliberate answer to "would you rather have a Good or a miss" rather than a tuning result. Do not sweep this constant against replays: replay error is ~1.0 deg sigma against 3.8 live, which is how it got moved on thin evidence twice.
 
 ## What differs from upstream
 
@@ -129,7 +131,7 @@ Pin the geometry if the window has ever moved mid-session. Moonlight registers a
 
 Everything above is verified offline and in dry-run. The one claim no amount of replay can settle is whether a self-reported `GREAT` matches what the game actually awarded, and that needs an armed match. Private games only — see the warning below.
 
-**Before starting.** The lead now adapts to the round trip the loop measures for itself, so there is no longer a calibration step to run first. `measure_latency.py` still exists, but treat it as a rough sanity check rather than the number to pass — it measures an idle process against a host text field, and has been wrong by a factor of two against the armed loop. If you do want to seed the starting lead, pass `--round-trip-ms`; it will drift toward the truth within a few checks anyway.
+**Before starting.** There is no calibration step to run first. The loop starts on the `--round-trip-ms` constant and moves off it once it has measured three round trips of its own. `measure_latency.py` still exists, but treat it as a rough sanity check rather than the number to pass — it measures an idle process against a host text field, and has been wrong by a factor of two against the armed loop.
 
 Then confirm the framing is right before arming, and keep the log:
 
@@ -157,6 +159,10 @@ The class on the first line is normally `(out)`, not `(great)`. That is the desi
 - `HIT reactive: … tracker stood down` appearing often. The tracker is not finding a zone; the framing is likely wrong.
 - `WARNING geometry changed`. Restart with `--pin-geometry`.
 - Verdicts that disagree with the game. Stop and re-run `measure_latency.py` before collecting more.
+
+**When it lands but misses, and the misses are all EARLY.** Read the sign on the `landed NNN deg — MISS, -N.N deg from Great centre` lines. If every miss is negative, the presses are arriving before the aim intended, which means the lead the loop assumed is longer than the round trip it is actually getting. The next line says both numbers: `round trip 30 ms measured, against 60 ms assumed`. A 23 ms gap is 7.5 degrees at 325 deg/s, and the Great band has **no early margin** — its leading edge is the edge of the success zone, so early goes straight to a miss while late spills into Good.
+
+Do not reach for `--round-trip-ms` first. Run `tools/rescore_policy.py` instead: it prints the per-session median round trip across every landings log on disk, which distinguishes the three cases that look identical in one night's output — a *burst* (a run of fast checks inside an otherwise normal session, which `BURST_TRIP_MS` already handles), a *level shift* (the whole session fast, which `lead_level_ms` handles), and ordinary jitter (which nothing handles, and which is the ~3.7 degree ceiling on this approach). This is what 2026-08-24 turned out to be: 32 fires, first half median 38 ms against second half 37, a level that had been drifting down for five sessions.
 
 **When nothing lands at all.** If no check ever produces a readable `landed NNN deg` line, the press is not reaching the game *when it was aimed to*, and no amount of `--round-trip-ms` tuning will help. A latency error cannot produce outright misses anyway: replay at believed 130 ms gives Good, not misses, until true latency reaches ~250 ms, and all-misses needs ~300 ms. Work down this ladder instead:
 

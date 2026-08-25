@@ -2,7 +2,7 @@
 
     .venv/bin/python tools/rescore_policy.py landings-*.jsonl
 
-Both `AIM_BIAS_DEG` and `BURST_TRIP_MS` are set from numbers produced this way, and
+`AIM_BIAS_DEG`, `BURST_TRIP_MS` and `LEVEL_WINDOW` are all set from numbers produced this way, and
 `AIM_BIAS_DEG`'s own comment ends with "Re-score the `.jsonl` landings instead" — but
 nothing in the repo did it, so every claim in those comment blocks had to be rebuilt by
 hand each time it was questioned. Twice the aim bias was moved on a replay sweep, which
@@ -166,6 +166,14 @@ def main(argv):
         print("  %-34s n=%3d  fixed %3dG/%2dM -> shipped %3dG/%2dM%s"
               % (name, len(fires), fv.count("GREAT"), fv.count("MISS"),
                  bv.count("GREAT"), bv.count("MISS"), moved))
+
+    print("\n=== where the link has been sitting ===")
+    print("  a level shift and a burst look identical inside one session; this is what")
+    print("  separates them, and the 60 ms constant went stale because nothing printed it")
+    for name, fires in sessions:
+        per = [r["round_trip_ms"] for r, _ in fires]
+        print("  %-34s n=%3d  median %5.1f  %5.1f to %5.1f ms"
+              % (name, len(per), median(per), min(per), max(per)))
 
     trips = [r["round_trip_ms"] for _, f in sessions for r, _ in f]
     below = [t for t in trips if t < autorun.BURST_TRIP_MS]
