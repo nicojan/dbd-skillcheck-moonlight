@@ -29,6 +29,7 @@ import os
 import sys
 from dataclasses import dataclass
 from re import sub
+from statistics import median
 from time import monotonic, sleep, strftime
 from typing import Optional
 
@@ -162,6 +163,47 @@ LEAD_MAX_MS = 160.0
 BURST_TRIP_MS = 40.0
 BURST_LEAD_MS = 45.0
 BURST_TRIP_FLOOR_MS = 20.0
+
+# The LEVEL the link is sitting at this session: the median of the last LEVEL_WINDOW
+# measured round trips, used as the base lead only when it disagrees with the constant by
+# more than LEVEL_DEADBAND_MS. The burst rule above still runs on top of whatever it gives.
+#
+# `--round-trip-ms` defaults to 60 because that is what the link measured in August, and
+# for five days it was right. It then drifted and nothing in here noticed. Per-session
+# median round trip, in order:
+# 57 61 55 59 62 60 61 62 64 61 68 52 62 63 62 66 60 42 61 61 66 55 52 56 49 37.
+# The last five run 55, 52, 56, 49, 37, and on 24-08 every one of 32 fires came back fast
+# (first-half median 38, second-half 37 — a level, not a burst). Against a 60 ms lead that
+# presses ~23 ms early, 7.5 deg at 325 deg/s, and the Great band has no early margin: that
+# session scored 13 Great / 5 MISS in 21 gradeable fires, more misses in one night than the
+# 25 sessions before it managed between them.
+#
+# This does NOT re-baseline the constant. A constant needs re-measuring every time the link
+# moves and would be just as wrong when it snaps back. Re-scored over all 864 gradeable
+# fires with `tools/rescore_policy.py`: the burst rule alone gives 671 Great / 19 MISS,
+# this gives 664 / 11. Seven Greats for eight misses — the trade AIM_BIAS_DEG already took.
+#
+# THE DEADBAND IS THE POINT, and the first version of this rule did not have one. Following
+# the level continuously also follows a session that sat at 52 or 63, which is inside the
+# plateau the fixed lead already handles, and it cost 23 Greats to buy the same 8 misses.
+# With the deadband the rule is dormant on 20 of 26 sessions and touches only the six whose
+# link genuinely moved; it adds a miss to none of them. That is the same shape as the burst
+# rule: catch the departure, leave the plateau alone.
+#
+# Every knob is a plateau, not a knife-edge. Window 7/9/11/15 and deadband 12-18 all land
+# between 9 and 11 misses at 76-77.5% Great; the floor is inert anywhere from 25 to 35
+# (identical totals) and only matters as a bound on how far one bad run could drag the aim.
+# LEVEL_MIN_SAMPLES exists because a median of one or two readings is just the reading —
+# under it the session runs on the constant, which is what every session's first checks do.
+#
+# Readings the watch could not measure never enter the window at all, which is what keeps
+# this from becoming the LEAD_GAIN mistake below: it cannot walk anywhere on a run of
+# broken measurements, and the clamp bounds it even if they were plausible.
+LEVEL_WINDOW = 9
+LEVEL_MIN_SAMPLES = 3
+LEVEL_DEADBAND_MS = 15.0
+LEVEL_MIN_MS = 30.0
+LEVEL_MAX_MS = 70.0
 
 # How long SPACE is held down. This is NOT cosmetic: the press was 5 ms, which a desktop
 # text field registers fine (key events are queued, so duration is irrelevant) but a game
@@ -317,6 +359,28 @@ def adapt_lead(lead_ms, measured_ms, gain=LEAD_GAIN, lo=LEAD_MIN_MS, hi=LEAD_MAX
     """
 
     return min(hi, max(lo, (1.0 - gain) * lead_ms + gain * measured_ms))
+
+
+def lead_level_ms(base_lead_ms, trips,
+                  window=LEVEL_WINDOW, min_samples=LEVEL_MIN_SAMPLES,
+                  deadband_ms=LEVEL_DEADBAND_MS, lo=LEVEL_MIN_MS, hi=LEVEL_MAX_MS):
+    """The base lead for this session so far, from the level the link is sitting at.
+
+    Returns `base_lead_ms` unchanged unless the clamped median of the last `window` round
+    trips disagrees with it by more than `deadband_ms` — see LEVEL_WINDOW for why the
+    deadband carries the whole rule.
+
+    Pure: `trips` is read, never mutated, and the caller owns the sequence. Median rather
+    than a mean or a gain because a burst is meant to fall THROUGH this rule to
+    `lead_for_check`, which is the thing that catches it; a mean would half-follow the
+    burst here and leave the burst rule nothing to catch.
+    """
+
+    recent = tuple(trips)[-window:]
+    if len(recent) < min_samples:
+        return base_lead_ms
+    level = min(hi, max(lo, median(recent)))
+    return level if abs(level - base_lead_ms) > deadband_ms else base_lead_ms
 
 
 def lead_for_check(base_lead_ms, last_trip_ms,
@@ -662,6 +726,7 @@ def run(args):
 
     lead_ms = args.round_trip_ms
     last_trip_ms = None   # previous check's measured round trip; see BURST_TRIP_MS
+    recent_trips = ()     # the last LEVEL_WINDOW of them; see LEVEL_WINDOW
 
     active = False
     frames = 0
@@ -784,7 +849,8 @@ def run(args):
                 # grab_screenshot returns RGB; the needle test is R - max(G,B) on a BGR
                 # array, so an unconverted frame silently measures blueness instead.
                 tracker = observe(tracker, frame[:, :, ::-1], (captured - track_t0) * 1000.0)
-                check_lead_ms = lead_for_check(lead_ms, last_trip_ms)
+                base_lead_ms = lead_level_ms(lead_ms, recent_trips)
+                check_lead_ms = lead_for_check(base_lead_ms, last_trip_ms)
                 decision = decide(tracker, (monotonic() - track_t0) * 1000.0, check_lead_ms)
 
                 if decision.press_at_ms is not None:
@@ -814,8 +880,11 @@ def run(args):
                         f"{requested_ms:.0f} ms requested / "
                         f"{(pressed_at - track_t0) * 1000 - now_ms:.0f} ms slept")
                     if check_lead_ms != lead_ms:
+                        why = ("burst, previous round trip was "
+                               f"{last_trip_ms:.0f} ms" if check_lead_ms != base_lead_ms
+                               else f"link level over {len(recent_trips)} trips")
                         log(f"  lead: {lead_ms:.0f} -> {check_lead_ms:.0f} ms for this "
-                            f"check — previous round trip was {last_trip_ms:.0f} ms")
+                            f"check — {why}")
                     landing = report_landing(
                         model, tracker, track_t0, args, pressed_at, decision.fit,
                         lead_ms=check_lead_ms,
@@ -835,6 +904,10 @@ def run(args):
                     # unmeasured check as a normal one is how the run gets missed.
                     if landing is not None and landing.round_trip_ms is not None:
                         last_trip_ms = landing.round_trip_ms
+                        # Rebuilt, not appended to: `lead_level_ms` must never see a
+                        # sequence that changed under it mid-check.
+                        recent_trips = (recent_trips +
+                                        (landing.round_trip_ms,))[-LEVEL_WINDOW:]
 
                     # Follow the link rather than a constant measured on one match. The
                     # correction is applied AFTER the landing is recorded, so the log shows

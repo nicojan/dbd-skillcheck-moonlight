@@ -32,6 +32,7 @@ import shutil
 import sys
 import tempfile
 from dataclasses import replace
+from statistics import median
 from time import monotonic
 from types import SimpleNamespace
 
@@ -597,6 +598,77 @@ def test_a_fast_round_trip_arms_a_shorter_lead_for_the_next_check():
           autorun.BURST_TRIP_FLOOR_MS < 27.3, autorun.BURST_TRIP_FLOOR_MS)
     check("...and still admits the burst population",
           autorun.lead_for_check(base, 31.6) == autorun.BURST_LEAD_MS)
+
+
+def test_the_lead_level_follows_the_link_and_the_burst_rule_still_runs_on_top():
+    """`lead_level_ms` moves the base lead only when the link's LEVEL has moved.
+
+    Why it exists: `--round-trip-ms` was pinned at 60 because that is what the link
+    measured for the first five days on record, and it then drifted to a per-session median
+    of 37 without anything noticing. 2026-08-24 fired 32 checks with a first-half median
+    trip of 38 and a second-half median of 37 — a level, not a burst — and scored 5 MISS in
+    21 gradeable fires, more than the 25 sessions before it managed between them.
+
+    Re-scored over all 864 gradeable fires: the burst rule alone gives 671 Great / 19 MISS,
+    this rule gives 664 / 11, dormant on 20 of the 26 sessions. See LEVEL_WINDOW.
+    """
+    import autorun
+
+    base = autorun.ROUND_TRIP_MS
+    check("with nothing measured yet it holds the base lead",
+          autorun.lead_level_ms(base, ()) == base)
+    check("...and still does under the minimum sample count",
+          autorun.lead_level_ms(base, (37.0,) * (autorun.LEVEL_MIN_SAMPLES - 1)) == base,
+          autorun.lead_level_ms(base, (37.0,) * (autorun.LEVEL_MIN_SAMPLES - 1)))
+
+    # 2026-08-24's own trips, in the order they were measured. Median 37.3.
+    night = (30.2, 20.4, 44.0, 32.4, 50.3, 22.1, 57.8, 40.4, 36.2)
+    check("a session-long fast link moves the lead down off the constant",
+          autorun.lead_level_ms(base, night) < base, autorun.lead_level_ms(base, night))
+    check("...onto the level it measured, not onto another constant",
+          abs(autorun.lead_level_ms(base, night) - median(night)) < 0.001,
+          autorun.lead_level_ms(base, night))
+
+    # The deadband is what keeps the rule off the plateau the fixed lead already handles.
+    # Without it, following these two cost 23 Greats and bought no extra miss.
+    august = (57.0, 61.0, 62.0, 60.0, 63.0, 61.0, 59.0, 64.0, 62.0)
+    check("the regime the constant was measured on is left exactly alone",
+          autorun.lead_level_ms(base, august) == base, autorun.lead_level_ms(base, august))
+    mid = (52.0, 53.0, 51.0, 54.0, 52.0, 50.0, 53.0, 52.0, 51.0)
+    check("...and so is a session merely at the low end of it",
+          autorun.lead_level_ms(base, mid) == base, autorun.lead_level_ms(base, mid))
+
+    check("the deadband leaves room under it for the clamp to matter",
+          autorun.LEVEL_DEADBAND_MS < base - autorun.LEVEL_MIN_MS,
+          (autorun.LEVEL_DEADBAND_MS, autorun.LEVEL_MIN_MS))
+    check("a run of impossible readings cannot drag the aim past the clamp",
+          autorun.lead_level_ms(base, (5.0,) * 9) == autorun.LEVEL_MIN_MS,
+          autorun.lead_level_ms(base, (5.0,) * 9))
+
+    # Median, not a mean, precisely so a burst survives to reach `lead_for_check`. Three
+    # fast readings inside a nine-wide window must not move the level at all — the burst
+    # rule is the thing that catches them, and it needs them intact.
+    steady = (61.0, 60.0, 62.0, 59.0, 63.0, 60.0)
+    check("a burst inside the window does not move the level",
+          autorun.lead_level_ms(base, steady + (33.0, 31.0, 34.0)) == base,
+          autorun.lead_level_ms(base, steady + (33.0, 31.0, 34.0)))
+    check("...and the burst rule still shortens the next check on its own",
+          autorun.lead_for_check(
+              autorun.lead_level_ms(base, steady + (33.0, 31.0, 34.0)), 34.0)
+          == autorun.BURST_LEAD_MS)
+
+    # Both knobs are plateaus: window 7-15 and deadband 12-18 all re-score to 9-11 misses
+    # at 76-77.5% Great. A later edit must not quietly leave that region.
+    check("the window stays inside the region measured as robust",
+          7 <= autorun.LEVEL_WINDOW <= 15, autorun.LEVEL_WINDOW)
+    check("...and so does the deadband",
+          12.0 <= autorun.LEVEL_DEADBAND_MS <= 18.0, autorun.LEVEL_DEADBAND_MS)
+
+    # Pure. The caller owns the sequence and the loop rebuilds it rather than appending.
+    trips = (61.0, 60.0, 62.0, 59.0, 63.0)
+    autorun.lead_level_ms(base, trips)
+    check("it does not mutate the sequence it was handed",
+          trips == (61.0, 60.0, 62.0, 59.0, 63.0), trips)
 
 
 def test_fire_does_not_overshoot_the_lead_it_was_given():
