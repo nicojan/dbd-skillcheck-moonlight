@@ -8,7 +8,11 @@ It began as a measurement rig, because the reason repair and heal checks never l
 
 ## Status
 
-Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks — verified armed, over twenty-six real matches between 2026-08-16 and 2026-08-24**: 864 gradeable fires, re-scored under the shipped policy at **664 Great (77%)**, 189 good, 11 miss, and every press accounted for.
+Working: window targeting, focus gating, detection, key delivery through the stream, wiggle checks, and **predictive firing on sweeping checks — verified armed, over twenty-seven real matches between 2026-08-16 and 2026-08-24**: 878 gradeable fires, re-scored under the shipped policy at **530 Great (60%)**, 345 good, **3 miss**, and every press accounted for.
+
+**That Great rate is deliberately low, and it is the point.** The aim is biased 4.5 degrees late (`AIM_BIAS_DEG`), which trades Greats for misses on purpose: a good is a full success that costs only the bonus, a miss costs progress and screams. Holding the aim at the middle of the Great band gives 707 Great (81%) and **69 misses**. If you want this bot to maximise Great instead of minimise failure, that constant is the one knob — read its comment block first, it carries the whole curve.
+
+**Misses are early misses, and the aim is clamped to the success zone rather than the Great band.** All 40 misses in 878 fires left through the *leading* edge; from the middle of the Great band there are 5 degrees of room early and 44 late. Until 2026-08-24 the bias was clamped to `great_width / 4` — a bound that keeps the shot inside the Great band, which is the wrong question once a good beats a miss. `aim_bias_for()` now clamps to the zone's trailing edge instead. Zero misses is not reachable: 4.29 of the 5.32 degrees of landing spread is present *within bursts of fires seconds apart*, where the link cannot have moved.
 
 The lead starts at 60 ms and follows the link from there. Two rules sit on top of the constant, both in `tools/autorun.py` and both re-derivable with `tools/rescore_policy.py`: a round trip under 40 ms shortens the *next* check to 45 (the link drops in bursts), and the clamped median of the last 9 measured trips replaces the constant outright when it disagrees by more than 15 ms (the link also drifts — its per-session median fell from ~60 ms to 38 over the week to 2026-08-24, which cost a night of misses before anything noticed).
 
@@ -105,6 +109,17 @@ Every predictive shot logs the fitted rate, the fit residual, the frame count be
 .venv/bin/python tools/read_landings.py landings-20260816-214940.jsonl
 ```
 
+**Two logs, and they answer different questions.** `landings-<timestamp>.jsonl` is the permanent archive — one file per session, never deleted, and the substrate every constant in this repo is derived from. Alongside it the bot writes `checks/checks-<timestamp>.jsonl`, a *queue* of checks nobody has looked at yet, with a new file each time a minute passes with no skill check, so one file is one continuous bout — a generator, a chase. Report on the queue and drain it with:
+
+```bash
+.venv/bin/python tools/pull_check_stats.py            # report, then move the queue to checks/archive/
+.venv/bin/python tools/pull_check_stats.py --peek     # report and leave it in place
+```
+
+Draining moves files, it never deletes them; the point is that a later pull cannot re-report checks you have already acted on. The queue also carries something the archive does not: **reactive presses.** The bot fires reactively on wiggle and on fitted checks with nowhere to aim, and until 2026-08-24 those left no record anywhere — eight of them in one session were invisible to every tool here, so "how many checks did we see" had no answer, only "how many did we grade". They are counted but never graded, because nothing watches where a reactive press lands.
+
+Do not use `pull_check_stats.py` to justify changing a constant. That is `rescore_policy.py`'s job, and it needs the whole pooled archive — reading a policy off one session has produced the wrong answer here twice.
+
 **A shell shortcut, if you run this often.** Drop this in `~/.zshrc` — it starts the stream, waits for it to settle, launches the game on the host, then runs the bot in the foreground of that terminal, which is where the Accessibility grant lives:
 
 ```zsh
@@ -181,17 +196,22 @@ Read this twice: EAC can treat injected input as an unfair advantage, and accoun
 
 ## Tools
 
-Eighteen small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
+Twenty-three small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
 
 | Tool | What it does |
 |---|---|
 | `autorun.py` | the detect and fire loop, focus-gated, predictive |
 | `replay_tracker.py` | runs the tracker over recorded checks and scores where each press lands |
+| `pull_check_stats.py` | reports the skill checks not yet looked at, then drains the queue to `checks/archive/` so the next pull starts clean |
+| `rescore_policy.py` | re-grades every landing ever recorded under a different lead or aim policy; the only tool that may justify changing a constant |
+| `check_log.py` | writes the per-check queue, one file per bout of checks |
 | `read_landings.py` | reads a match's `landings-*.jsonl` back: Great rate, landing bias and spread, round trip, and the raw readings behind any fire that produced no verdict |
 | `test_needle_tracker.py` | unit tests for the tracker's logic, including the reversed-check path |
 | `test_landing_report.py` | tests the armed-only self-scoring path, which no dry-run reaches |
 | `test_continuous_check.py` | replays a 21 s Merciless Storm check unbroken; covers the buffer caps and the freeze loop |
+| `test_check_log.py` | tests the gap rotation and that draining the queue never loses or clobbers a bout |
 | `calibrate_window.py` | draws the capture box on a frame so you can see the framing |
+| `replay_centre_crop.py` | crops a recorded frame the way the live grab frames it, for any "would the bot press here?" question |
 | `measure_latency.py` | keypress to pixel round trip |
 | `test_keypress.py` | isolates whether synthetic keys reach the host at all |
 | `record_checks.py` | clean 224-pixel frame sequences of individual checks |
