@@ -21,10 +21,14 @@ reconstruction: 214 of 377 logged fires (57%) ran with `--adapt-lead` on and wer
 something other than 60 ms, so assuming a 60 ms baseline mis-scores the majority of the
 record. That mistake is what this docstring is here to stop being made a third time.
 
-What it CANNOT model is a
-policy that changes whether a check fires at all — a later target is a later deadline, so
-a large aim bias trades misses for no-fires that this arithmetic cannot see. Treat a bias
-past `great_width / 4` as unmeasured rather than good.
+What it CANNOT model is a policy that changes whether a check fires at all. For the aim
+bias specifically that limit turned out to be vacuous, and this docstring asserted the
+opposite for four days: a LATER target makes `lands` later, so `decide`'s
+`press_at = lands - round_trip` is later too and there is MORE time to make it. The sign
+was inverted. Of 77 no-presses in 1114 recorded decisions not one is "too late by N ms" or
+"Great already passed" — every one is too-few-samples, poor fit, or rate out of range, and
+the aim reaches none of those. So a bias past `great_width / 4` is measurable after all,
+and the sweep below runs to 10 deg. See `aim_bias_for` for the clamp that replaced it.
 
 """
 
@@ -38,10 +42,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import autorun
-from dbd.utils.needle_tracker import AIM_BIAS_DEG, Zone, score_freeze
+from dbd.utils import needle_tracker
+from dbd.utils.needle_tracker import AIM_BIAS_DEG, Zone, aim_bias_for, score_freeze
 
 MAX_PLAUSIBLE_TRIP_MS = 200.0   # past this it is a wrapped revolution, not a latency
 HISTORIC_BIAS_DEG = 1.0         # the aim used before `aim_bias_deg` was logged per fire
+
+
+def clamp_bias(bias_deg, zone):
+    """`aim_bias_for` for an arbitrary candidate bias, not just the shipped constant."""
+
+    room = zone.zone_width - zone.great_width / 2.0 - needle_tracker.ZONE_KEEP_DEG
+    return max(0.0, min(bias_deg, room))
 
 
 def load_sessions(paths):
@@ -97,9 +109,17 @@ def regrade(sessions, lead_of, bias_deg=AIM_BIAS_DEG):
             # did exactly that when the bias moved off 1.0. `HISTORIC_BIAS_DEG` covers the
             # fires that pre-date the field; git says the constant was 1.0 from 08-15 17:01,
             # before the earliest landings file, so every one of them was aimed at 1.0.
-            was = record.get("aim_bias_deg", HISTORIC_BIAS_DEG)
-            bias_delta = (min(bias_deg, zone.great_width / 4.0)
-                          - min(was, zone.great_width / 4.0))
+            # What this fire was ACTUALLY aimed with, under the clamp in force when it was
+            # written: `aim_bias_effective_deg` where the run logged it, and the old
+            # `great_width / 4` bound for every record that pre-dates the zone clamp.
+            # Re-clamping a historic record with today's rule would credit it with an aim
+            # it never took, which is the same class of error `aim_bias_deg` was added to
+            # stop — one level further in.
+            was = record.get("aim_bias_effective_deg")
+            if was is None:
+                was = min(record.get("aim_bias_deg", HISTORIC_BIAS_DEG),
+                          zone.great_width / 4.0)
+            bias_delta = clamp_bias(bias_deg, zone) - was
             # into along-sweep degrees, where negative is early and the Great band's leading
             # edge sits at -great_width/2 with no margin behind it
             along = record["error_deg"] * sign + lead_delta * per_ms + bias_delta
@@ -120,10 +140,19 @@ def shipped(last_trip_ms, trips):
 
 
 def line(label, verdicts, errors):
+    """One row. Misses are split by WHICH EDGE they left through, because the two are
+    different failure modes with different causes: an early miss is a link drop the lead
+    did not catch, a late miss is a link spike carried over the zone's trailing edge by
+    the aim bias. Raising the bias trades the first for the second, and a total alone
+    hides the moment that trade starts costing."""
+
     n = len(verdicts)
-    return ("  %-40s %3d GREAT (%4.1f%%)  %2d good  %2d MISS   mean %+5.2f  sd %4.2f deg"
+    early = sum(1 for v, e in zip(verdicts, errors) if v == "MISS" and e <= 0)
+    late = sum(1 for v, e in zip(verdicts, errors) if v == "MISS" and e > 0)
+    return ("  %-40s %3d GREAT (%4.1f%%)  %3d good  %2d MISS (%2de/%2dl)  mean %+5.2f  sd %4.2f"
             % (label, verdicts.count("GREAT"), 100.0 * verdicts.count("GREAT") / n,
-               verdicts.count("good"), verdicts.count("MISS"), mean(errors), stdev(errors)))
+               verdicts.count("good"), verdicts.count("MISS"), early, late,
+               mean(errors), stdev(errors)))
 
 
 def main(argv):
@@ -148,7 +177,7 @@ def main(argv):
 
     print("\n=== aim bias (lead held at the shipped level + burst rule) ===")
     rule = shipped
-    for bias in (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0):
+    for bias in (0.0, 1.0, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 8.0, 10.0):
         mark = "  <-- shipped" if bias == AIM_BIAS_DEG else ""
         print(line("bias %.1f deg%s" % (bias, mark), *regrade(sessions, rule, bias_deg=bias)))
 

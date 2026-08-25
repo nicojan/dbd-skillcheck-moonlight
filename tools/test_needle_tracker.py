@@ -23,7 +23,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
 
 from dbd.utils.needle_tracker import (
-    AIM_BIAS_DEG, Fit, MIN_NEEDLE_STRENGTH, Reading, Sample, TrackerState, Zone, decide,
+    AIM_BIAS_DEG, Fit, MIN_NEEDLE_STRENGTH, Reading, Sample, TrackerState, ZONE_KEEP_DEG,
+    Zone, aim_bias_for, decide,
     fit_sweep, lit_floor, lit_span, read_watch, score_freeze, strength_reference,
     time_to_angle, trim_frozen_tail, _longest_run,
 )
@@ -102,13 +103,60 @@ def test_decide_leads_by_the_round_trip_both_directions():
         state = TrackerState(samples=samples, zone=zone, centre_fixed=True)
 
         decision = decide(state, now, round_trip_ms=72.0)
-        # The aim sits a degree past the middle of the band, in the needle's direction.
-        expected_travel = (120.0 + min(AIM_BIAS_DEG, 10.0 / 4.0)) / abs(rate) * 1000.0
+        # The aim sits the bias past the middle of the band, in the needle's direction.
+        # Asked of `aim_bias_for` rather than recomputed here: a test that restates the
+        # clamp cannot catch the clamp being wrong, and this one did not when the bound
+        # moved from the Great band to the zone.
+        expected_travel = (120.0 + aim_bias_for(zone)) / abs(rate) * 1000.0
         check(f"decide leads by the round trip at {rate:+.0f} deg/s",
               decision.press_at_ms is not None
               and abs(decision.lands_at_ms - (now + expected_travel)) < 2.0
               and abs(decision.lands_at_ms - decision.press_at_ms - 72.0) < 1e-6,
               f"{decision.reason}")
+
+
+def test_aim_bias_is_clamped_to_the_zone_not_the_great_band():
+    """The bound that matters is the SUCCESS zone's trailing edge, not the Great band's.
+
+    The old clamp was `great_width / 4`, which answers "how far can I go and still be
+    Great" — the wrong question once a good beats a miss. These cases pin the difference:
+    on a normal check the bias is applied in full where the old bound would have clipped
+    it to 2.5, and on a zone too narrow to hold it the new bound still binds.
+    """
+
+    # A drawn check: 10 deg Great at the leading edge of a 49 deg zone. Room to the
+    # trailing edge is 49 - 5 - 8 = 36 deg, so the full bias applies.
+    normal = Zone(great_start=0.0, great_end=10.0, zone_start=0.0, zone_end=49.0)
+    check("the full bias applies on a normal zone",
+          abs(aim_bias_for(normal) - AIM_BIAS_DEG) < 1e-9,
+          f"got {aim_bias_for(normal)}")
+    check("...which the old great_width/4 bound would have clipped",
+          min(AIM_BIAS_DEG, normal.great_width / 4.0) < AIM_BIAS_DEG,
+          "the old bound no longer binds here, so this test proves nothing")
+
+    # A zone barely wider than its own Great: room is 14 - 5 - 8 = 1 deg.
+    narrow = Zone(great_start=0.0, great_end=10.0, zone_start=0.0, zone_end=14.0)
+    check("a narrow zone clamps the bias down",
+          abs(aim_bias_for(narrow) - 1.0) < 1e-9, f"got {aim_bias_for(narrow)}")
+
+    # `full white` fills its zone with one solid block, so the band reads 33-59 deg. That
+    # is NOT a no-room case, and asserting it was is how this test first failed: great_mid
+    # sits in the middle of the block, so a 50 deg zone still leaves 17 deg behind the aim.
+    full = Zone(great_start=0.0, great_end=50.0, zone_start=0.0, zone_end=50.0)
+    check("a full-white zone has room and takes the full bias",
+          abs(aim_bias_for(full) - AIM_BIAS_DEG) < 1e-9, f"got {aim_bias_for(full)}")
+
+    # The case that genuinely has no room: a zone no wider than its own Great. The aim
+    # must fall back to great_mid rather than going negative and aiming EARLY, which is
+    # the one direction that turns a good into a miss.
+    cramped = Zone(great_start=0.0, great_end=10.0, zone_start=0.0, zone_end=10.0)
+    check("a zone with no room gives no bias rather than a negative one",
+          aim_bias_for(cramped) == 0.0, f"got {aim_bias_for(cramped)}")
+    check("and no zone at all is the same",
+          aim_bias_for(None) == 0.0, f"got {aim_bias_for(None)}")
+
+    check("the keep margin is what separates the two narrow cases",
+          ZONE_KEEP_DEG == 8.0, f"got {ZONE_KEEP_DEG}")
 
 
 def test_decide_refuses_when_it_cannot_win():

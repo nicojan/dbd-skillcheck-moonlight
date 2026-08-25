@@ -169,13 +169,82 @@ GREAT_FALLBACK_DEG = 10.5  # measured; the simulator's default of 15 is 40% too 
 # both, and its three misses were the three shortest round trips of the night (35.7, 22.3,
 # 38.1 ms against a 55.2 ms median). Nothing has ever missed late, in 654 fires.
 #
-# 2.5 and not more because of the `great_width / 4` clamp in `decide`: on the usual 10 deg
-# Great that IS 2.5, so this is the largest bias that is actually applied rather than
-# clipped, and `rescore_policy.py`'s docstring is right that past the clamp the arithmetic
-# stops being able to grade itself. The residual unmeasured cost is the no-fire risk named
-# above — 1.5 deg later is ~4.6 ms later at 325 deg/s, well inside one 20-30 ms frame, but
-# a re-score cannot see a fire it turns into a no-fire. Watch `NO PRESS` counts.
-AIM_BIAS_DEG = 2.5
+# **4.5 on 2026-08-24, on 878 pooled armed fires, because "until this no longer misses".**
+# The 2.5 ceiling above was wrong twice over, and both errors pointed the same way.
+#
+# First, the clamp. `great_width / 4` keeps the shot inside the GREAT BAND — it is a
+# Great-maximising constraint, and it has nothing to do with missing. What actually bounds
+# a safe aim is the SUCCESS ZONE's trailing edge, and the zone is not centred on the Great:
+# measured over every graded zone on record, from `great_mid` there are 5.0 deg of room
+# early and 44.0 deg late. The clamp was reading the margin off the wrong band, which is
+# why 2.5 looked like a ceiling when it is barely a tenth of the way to one. `aim_bias_for`
+# below clamps to the zone instead, keeping ZONE_KEEP_DEG in hand.
+#
+# Second, the no-fire risk this block and `rescore_policy.py` both named as the reason not
+# to go further does not exist, in either direction. `decide` schedules `press_at = lands -
+# round_trip`; a LATER target makes `lands` later, so `press_at` is later too and there is
+# MORE time to make it, not less. The sign was inverted. And empirically the branch has
+# never fired: of 77 no-presses in 1114 recorded decisions, every one is "only N samples",
+# "fit too poor" or "rate out of range" — not one is "too late by N ms" or "Great already
+# passed", and none of those three causes is reachable from the aim. ("Great already
+# passed" is phase-symmetric under a bias shift: a bias of d flips a d-wide band of arrival
+# phases out of range and an equally wide band in.)
+#
+# Re-scored with `tools/rescore_policy.py` over all 878 gradeable fires, lead on the
+# shipped level + burst rule, misses split by which edge they left through:
+#
+#     bias 2.5 (was shipped)  673 GREAT (76.7%)  193 good  12 MISS  (12 early / 0 late)
+#     bias 3.0                640 GREAT (72.9%)  230 good   8 MISS  ( 8 early / 0 late)
+#     bias 3.5                614 GREAT (69.9%)  258 good   6 MISS  ( 5 early / 1 late)
+#     bias 4.0                571 GREAT (65.0%)  302 good   5 MISS  ( 4 early / 1 late)
+#     bias 4.5                530 GREAT (60.4%)  345 good   3 MISS  ( 2 early / 1 late)
+#     bias 5.0                482 GREAT (54.9%)  393 good   3 MISS  ( 2 early / 1 late)
+#     bias 6.0                396 GREAT (45.1%)  479 good   3 MISS  ( 2 early / 1 late)
+#     bias 8.0                239 GREAT (27.2%)  637 good   2 MISS  ( 1 early / 1 late)
+#     bias 10.0               126 GREAT (14.4%)  751 good   1 MISS  ( 0 early / 1 late)
+#
+# 4.5 is the LAST value that buys a miss: 5.0 and 6.0 pay 134 more Greats for nothing.
+# Per session it is 6 better, 21 unchanged, 0 worse on misses. Beyond it the curve is flat
+# until 8.0 and the cost is all Great.
+#
+# ZERO IS NOT REACHABLE and no value here should be read as trying. The floor is 1 miss in
+# 878 at bias 10-12, bought with 85% of the Greats, and it rises again past 15 as late
+# misses take over. 4.29 deg of the 5.32 deg landing spread is present WITHIN bursts of
+# fires seconds apart, where the link cannot have moved; that is aim noise, and no aim or
+# lead policy reaches it.
+#
+# The real cost, and it is a new failure mode rather than a worse one: **a late miss is now
+# possible.** "Nothing has ever missed late" held for 654 fires and is no longer true above
+# 3.0 — the one late miss here is 2026-08-24 20:49:45, the 156 ms link spike, carried over
+# the trailing edge by the extra bias. If that mode shows up more than once a session, 3.0
+# is the largest bias with none of it, and it still takes misses 12 -> 8.
+AIM_BIAS_DEG = 4.5
+
+# How much of the success zone to leave in hand behind the aim. This is what stops a wide
+# bias from walking onto the trailing edge on a check whose zone is narrower than usual —
+# the clamp binds on the zone that is actually drawn, not on the median one.
+ZONE_KEEP_DEG = 8.0
+
+
+def aim_bias_for(zone):
+    """How far past `great_mid` to aim on THIS check, in degrees along the sweep.
+
+    Clamped to the success zone rather than to the Great band. The old `great_width / 4`
+    bound answered "how far can I go and still be Great", which is the wrong question once
+    a good beats a miss: it is the ZONE's trailing edge that separates a good from a miss,
+    and on a drawn check that edge is ~9x further away than the Great band's.
+
+    Never negative: on a zone no wider than its own Great the bound collapses and the aim
+    falls back to `great_mid`, rather than going negative and aiming EARLY — the one
+    direction that turns a good into a miss. Note this is NOT the `full white` case, which
+    looks degenerate but is not: its Great fills a 33-59 deg block, so `great_mid` sits in
+    the middle of it and there is still room behind the aim.
+    """
+
+    if zone is None:
+        return 0.0
+    room = zone.zone_width - zone.great_width / 2.0 - ZONE_KEEP_DEG
+    return max(0.0, min(AIM_BIAS_DEG, room))
 
 
 @dataclass(frozen=True)
@@ -645,9 +714,9 @@ def decide(state, now_ms, round_trip_ms=ROUND_TRIP_MS):
     if state.zone is None:
         return Decision(reason="no zone drawn yet", fit=fit, may_react=True)
 
-    # Never bias past the band's own trailing edge: on a narrow Great — Unnerving Presence
-    # and Overcharge both shrink the zone — a fixed offset would aim clean out of it.
-    bias = min(AIM_BIAS_DEG, state.zone.great_width / 4.0)
+    # Never bias past the zone's own trailing edge: on a narrow zone — Unnerving Presence
+    # and Overcharge both shrink it — a fixed offset would aim clean out of it.
+    bias = aim_bias_for(state.zone)
     target = (state.zone.great_mid + bias * (1.0 if fit.rate_deg_s > 0 else -1.0)) % 360.0
     lands = time_to_angle(fit, target, now_ms)
     press_at = lands - round_trip_ms

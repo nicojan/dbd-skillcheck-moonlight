@@ -40,8 +40,8 @@ from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.needle_tracker import (
-    AIM_BIAS_DEG, ROUND_TRIP_MS, Reading, TrackerState, decide, mark_fired, needle_angle,
-    observe,
+    AIM_BIAS_DEG, ROUND_TRIP_MS, Reading, TrackerState, aim_bias_for, decide, mark_fired,
+    needle_angle, observe,
     read_watch, score_freeze, strength_reference, time_to_angle,
 )
 
@@ -160,6 +160,38 @@ LEAD_MAX_MS = 160.0
 # in 420 fires is 27.3. `plausible_round_trip` did not catch them because it only rejects
 # readings ABOVE half a revolution; it has no lower bound. A reading under the floor is a
 # broken measurement, not a fast link, and following it is how a good rule earns a bad name.
+#
+# WHAT MAKES THIS RULE WORK, AND WHY THE OBVIOUS GENERALISATIONS DO NOT. The burst rule
+# leans on autocorrelation: P(trip < 40 | previous < 40) is 41.7% against a 4.1% base, a
+# 10x lift, so the previous fire genuinely carries information about the next one. That is
+# the test a variable lead or aim policy has to pass, and it is the only test that matters,
+# because you learn a fire's round trip only AFTER you have pressed. Three candidates were
+# measured against it on 2026-08-24 over 878-1033 fires and all three failed:
+#
+#   * A mirror of this rule for SLOW trips. P(next > 85 | previous > 85) is 6.7% against a
+#     3.0% base on n=30, and 0 of 8 above 110 ms. Slow trips do not cluster. The 108 ms
+#     then 156 ms pair on 2026-08-24 that cost two Greats is chance, not a catchable run.
+#   * Lead varying with measured JITTER — lead = level - k*MAD(last 9). corr(rolling MAD,
+#     |next deviation|) = 0.065; the calmest third of windows is followed by a 6.4 ms median
+#     deviation against the jitteriest third's 7.6. Re-scored, k=0.25 takes misses 12 -> 9
+#     for 34 Greats, against the aim bias's 1.7 Greats per miss on the same fires.
+#   * Aim varying with this check's own FIT QUALITY, which unlike the link is measured
+#     before the press. corr(fit_rms, |error|) = -0.026. `fit_n < 12` is the one real signal
+#     (7.6% miss rate and 7.01 deg sd, against 3.4% and 4.06 for 16-22 frames) but a bias
+#     conditioned on it lands ON the constant-bias curve, not above it: 2.5 + 8.0 if
+#     fit_n < 12 gives 627 Great / 9 MISS where a constant at the same 627 Great gives 7.
+#
+# The reason they all fail the same way is structural, and it is worth stating once: a lead
+# and an aim bias are both pure TRANSLATIONS of the landing. Neither narrows the spread —
+# every row above holds sd at 4.86 deg. So a variable policy can only put the distribution
+# somewhere a constant could also have put it, and it pays for the privilege with the noise
+# in its own estimator. Varying the lead by jitter is a noisy re-implementation of
+# AIM_BIAS_DEG.
+#
+# And the spread is mostly out of reach anyway: 4.29 deg of the 5.32 deg landing sd is
+# present WITHIN bursts of fires seconds apart, where the link cannot have moved. Only
+# 3.14 deg is even addressable by any lead policy, and the two rules here already take
+# part of it. Reducing the rest means a better instrument, not a better policy.
 BURST_TRIP_MS = 40.0
 BURST_LEAD_MS = 45.0
 BURST_TRIP_FLOOR_MS = 20.0
@@ -614,6 +646,15 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
                 # constant moved — the same class of error the lead already avoids by
                 # logging `lead_ms`.
                 "aim_bias_deg": AIM_BIAS_DEG,
+                # The bias ACTUALLY applied to this check, after `aim_bias_for` clamps it
+                # to this zone's trailing edge. `aim_bias_deg` above is the raw constant,
+                # and the two differ on any zone narrow enough to bind. Logging only the
+                # constant was survivable while the clamp was `great_width / 4` and could
+                # be re-derived; it stopped being so when the clamp moved, because a
+                # re-score cannot tell which clamp a historic record was written under.
+                # Absent on records before 2026-08-24 — `rescore_policy.py` falls back to
+                # the old clamp for those, which is what they were written with.
+                "aim_bias_effective_deg": round(aim_bias_for(tracker.zone), 2),
                 "watch_ms": round((monotonic() - pressed_at) * 1000.0, 1),
                 "rate_deg_s": None if fit is None else round(fit.rate_deg_s, 1),
                 "fit_rms_deg": None if fit is None else round(fit.rms_deg, 2),
