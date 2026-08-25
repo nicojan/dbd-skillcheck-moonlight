@@ -30,3 +30,7 @@ recordings_video/
 armed-*.log
 reactive-*.log
 landings-*.jsonl
+
+# the per-check queue and its drain target: same per-run capture data as above, just
+# filed by bout instead of by session
+checks/

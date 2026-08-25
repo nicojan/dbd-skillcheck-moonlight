@@ -39,6 +39,7 @@ from dbd.AI_model import AI_model
 from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
+from check_log import ROTATE_GAP_SECONDS, CheckLog, reactive_record
 from dbd.utils.needle_tracker import (
     AIM_BIAS_DEG, ROUND_TRIP_MS, Reading, TrackerState, aim_bias_for, decide, mark_fired,
     needle_angle, observe,
@@ -281,6 +282,9 @@ def parse_args(argv=None):
                         "(off by default — it cost more Greats than it won; see adapt_lead)")
     p.add_argument("--landing-log", default=None,
                    help="JSONL of every freeze watch (default: landings-<timestamp>.jsonl)")
+    p.add_argument("--no-check-log", dest="check_log_enabled", action="store_false",
+                   help="don't write the per-check queue under checks/ that "
+                        "tools/pull_check_stats.py drains")
     p.add_argument("--no-landing-log", dest="landing_log_enabled", action="store_false",
                    help="do not record the freeze watch readings")
     p.add_argument("--dry-run", action="store_true", help="log detections without pressing keys")
@@ -765,6 +769,19 @@ def run(args):
     if args.landing_log_enabled and not args.dry_run:
         path = args.landing_log or f"landings-{strftime('%Y%m%d-%H%M%S')}.jsonl"
         landing_log = LandingLog(path)
+
+    # The per-check queue. Separate from the archive above on purpose — see check_log.py:
+    # this one gets drained by `pull_check_stats.py` and that one never does.
+    check_log = CheckLog() if args.check_log_enabled and not args.dry_run else None
+
+    def record_check(record, path_taken):
+        """Put one check in the queue, announcing a new bout when the gap rule fires."""
+
+        if check_log is None:
+            return
+        path, rotated = check_log.write(record, path_taken)
+        if rotated:
+            log(f"  checks: new bout after {ROTATE_GAP_SECONDS:.0f}s quiet -> {path}")
         log(f"freeze watch readings -> {path}")
     log(f"waiting for '{args.window}' to become active (ctrl-c to quit)")
 
@@ -792,13 +809,15 @@ def run(args):
         note = no_press_note(tracked_desc, tracker, decision, tracked_ms)
         if note is not None:
             log(note)
+            # Same file as the fires, marked `no press`, so one reader sees both. A
+            # dropped check that leaves nothing behind is the failure this whole log
+            # exists to close, and it was still open for exactly the worst checks.
+            record = no_press_record(
+                tracked_desc, tracker, decision, tracked_ms,
+                context={"fire": None, "at": strftime("%H:%M:%S")})
             if landing_log is not None:
-                # Same file as the fires, marked `no press`, so one reader sees both. A
-                # dropped check that leaves nothing behind is the failure this whole log
-                # exists to close, and it was still open for exactly the worst checks.
-                landing_log.write(no_press_record(
-                    tracked_desc, tracker, decision, tracked_ms,
-                    context={"fire": None, "at": strftime("%H:%M:%S")}))
+                landing_log.write(record)
+            record_check(record, "no press")
             # The counts are per reason, and `decide` builds its reasons with the numbers
             # in them ("only 4 samples"), so the digits come out or every check is its own
             # category and the tally says nothing.
@@ -932,7 +951,11 @@ def run(args):
                     landing = report_landing(
                         model, tracker, track_t0, args, pressed_at, decision.fit,
                         lead_ms=check_lead_ms,
-                        record=None if landing_log is None else landing_log.write,
+                        # One record, two destinations: the permanent archive and the
+                        # drainable queue. Built once inside `report_landing` so the two
+                        # can never disagree about what a fire was.
+                        record=lambda r: (landing_log.write(r) if landing_log else None,
+                                          record_check(r, "predictive")),
                         context={"fire": len(landings) + 1, "at": strftime("%H:%M:%S"),
                                  "desc": desc, "target_deg": decision.target_deg,
                                  "lead_requested_ms": round(requested_ms, 1),
@@ -974,6 +997,14 @@ def run(args):
                     fire(args, 0.0)
                     log(f"{'WOULD HIT' if args.dry_run else 'HIT'} reactive: {desc} — "
                         f"tracker stood down ({decision.reason})")
+                    # Until 2026-08-24 this press left nothing behind but the line above.
+                    # It is a skill check the bot acted on, so it belongs in the count of
+                    # checks acted on, even though nothing watched where it landed.
+                    record_check(reactive_record(
+                        desc, max(probs.values()), reason=decision.reason,
+                        at=strftime("%H:%M:%S"),
+                        rate_deg_s=None if decision.fit is None
+                        else round(decision.fit.rate_deg_s, 1)), "reactive")
                     tracker = None
                     sleep(HIT_COOLDOWN_SECONDS)
                     window_start, last_capture = monotonic(), None
@@ -997,6 +1028,10 @@ def run(args):
                 confidence = float(max(probs.values()))
                 log(f"{'WOULD HIT' if args.dry_run else 'HIT'}: {desc} ({confidence:.3f})")
                 fire(args, 0.0)
+                # Wiggle, and everything under --no-predict. Eight of these in the
+                # 2026-08-24 20:44 session were invisible to every stats tool in the repo.
+                record_check(reactive_record(desc, confidence, at=strftime("%H:%M:%S")),
+                             "reactive")
 
                 sleep(HIT_COOLDOWN_SECONDS)  # don't re-trigger on the same skill check
                 window_start, last_capture = monotonic(), None
@@ -1020,6 +1055,11 @@ def run(args):
         if landing_log is not None:
             log(f"  {landing_log.written} freeze watches recorded in {landing_log.path}")
             landing_log.close()
+        if check_log is not None:
+            log(f"  {check_log.total} checks queued across {check_log.files} "
+                f"bout(s) in {check_log.directory}/ — "
+                f"read and drain with tools/pull_check_stats.py")
+            check_log.close()
         model.cleanup()
 
 
