@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dbd.utils import bout_session
-from review_recordings import apply_selection, empty_discard, scan
+from review_recordings import apply_selection, empty_discard, pending_notice, scan
 
 FAILED = []
 
@@ -176,6 +176,38 @@ def test_empty_discard_deletes_only_the_pile():
 # tests nothing and looks like a navigation bug.
 
 KEY_DOWN_APP = b"\x1bOB"
+
+
+
+def test_pending_is_silent_when_nothing_is_waiting():
+    """Silence is the contract: this runs at the start of every `dbd`, and a line printed
+    every evening is a line nobody reads by the third one."""
+
+    root = tempfile.mkdtemp()
+    try:
+        check("an empty root says nothing", pending_notice(scan(root)) == "",
+              repr(pending_notice(scan(root))))
+        make_bout(root, "bout_00", checks=2, reviewed=True)
+        check("a reviewed bout says nothing either",
+              pending_notice(scan(root)) == "", repr(pending_notice(scan(root))))
+    finally:
+        shutil.rmtree(root)
+
+
+def test_pending_names_what_is_waiting():
+    root = tempfile.mkdtemp()
+    try:
+        for i in range(3):
+            make_bout(root, f"bout_{i:02d}", checks=i + 1)
+        notice = pending_notice(scan(root))
+        check("it counts the bouts", notice.startswith("3 unreviewed bouts"), notice)
+        check("and sizes them", "MB)" in notice or "GB)" in notice, notice)
+        make_bout(root, "bout_03", checks=1, reviewed=True)
+        check("a reviewed bout is not counted",
+              pending_notice(scan(root)).startswith("3 unreviewed bouts"),
+              pending_notice(scan(root)))
+    finally:
+        shutil.rmtree(root)
 
 
 def drive_tui(root, keys, settle=1.2, per_key=0.5):

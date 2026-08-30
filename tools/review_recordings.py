@@ -10,6 +10,7 @@ evenings and the rare bout is lost in the pile either way.
     .venv/bin/python tools/review_recordings.py            # the TUI
     .venv/bin/python tools/review_recordings.py --list     # print and exit, no changes
     .venv/bin/python tools/review_recordings.py --empty-discard
+    .venv/bin/python tools/review_recordings.py --pending    # one line, or silence
 
 Keys: up/down or j/k move, SPACE toggles, `a` toggles all, `p` opens the middle frame of
 the bout so you can see what it was, ENTER applies, `q` quits changing nothing.
@@ -133,6 +134,23 @@ def empty_discard(root=DEFAULT_ROOT):
     return len(names), freed
 
 
+def pending_notice(bouts):
+    """One line naming what is waiting, or "" when nothing is — for a caller to frame.
+
+    Silent-when-empty is the whole contract. This runs at the START of every `dbd`, where
+    the normal case is nothing pending because the previous run's review already dealt
+    with it, and a line printed every time is a line nobody reads by the third evening.
+    It exists for the abnormal case: a review that never happened because the terminal was
+    closed, the link dropped, or Ctrl-C ate the shell function, which is what left four
+    bouts and 993 MB sitting unnoticed on 2026-08-30.
+    """
+
+    if not bouts:
+        return ""
+    return (f"{plural(len(bouts), 'unreviewed bout')} "
+            f"({human_size(sum(b.bytes for b in bouts))}) left from an earlier run")
+
+
 def print_list(bouts):
     if not bouts:
         print("no unreviewed bouts")
@@ -250,6 +268,9 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root", default=DEFAULT_ROOT, help="where bouts were recorded")
     p.add_argument("--list", action="store_true", help="print the bouts and exit")
+    p.add_argument("--pending", action="store_true",
+                   help="print one line if bouts are waiting and nothing at all if they "
+                        "are not, for a caller that runs on every launch")
     p.add_argument("--empty-discard", action="store_true",
                    help="permanently delete everything already discarded")
     args = p.parse_args()
@@ -260,6 +281,11 @@ def main():
         return 0
 
     bouts = scan(args.root)
+    if args.pending:
+        notice = pending_notice(bouts)
+        if notice:
+            print(notice)
+        return 0
     if args.list:
         print_list(bouts)
         return 0

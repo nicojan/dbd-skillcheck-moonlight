@@ -18,6 +18,7 @@ import os
 import re
 import select
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -28,6 +29,8 @@ FAILED = []
 # control below was run: strip the traps, watch these tests fail, put them back.
 ZSHRC = os.environ.get("DBD_ZSHRC", os.path.expanduser("~/.zshrc"))
 TAIL_START = '  cd "$repo" || return 1'
+PENDING_START = "  # --- pending bouts (extracted by tools/test_dbd_shell.py) ---"
+PENDING_END = "  # --- end pending bouts ---"
 
 STUB_PYTHON = '''#!/usr/bin/env python3
 """Stands in for both .venv/bin/python entry points, told apart by the script argument."""
@@ -48,7 +51,14 @@ if "autorun" in script:
         # recorder's frame and drop counts. All of it is written AFTER the signal lands.
         print("SUMMARY: 0 dropped", flush=True)
 elif "review_recordings" in script:
-    print("REVIEW RAN", flush=True)
+    if "--pending" in sys.argv:
+        root = sys.argv[sys.argv.index("--root") + 1] if "--root" in sys.argv else "frames"
+        # Silent unless something is waiting. That contract is what the shell block is
+        # built on, so the stub honours it rather than always printing.
+        if os.path.isdir(root) and os.listdir(root):
+            print("2 unreviewed bouts (40 MB) left from an earlier run", flush=True)
+    else:
+        print("REVIEW RAN", flush=True)
 '''
 
 
@@ -58,23 +68,36 @@ def check(name, ok, detail=""):
         FAILED.append(name)
 
 
-def extract_tail(path=ZSHRC):
-    """The armed-run block of `dbd`, verbatim: from the `cd` to the function's close.
+def extract(start, end, path=ZSHRC):
+    """Lines of `dbd` from `start` up to (not including) `end`, verbatim.
 
-    Anchored on text rather than line numbers so an edit above it does not silently
-    shift the window and leave this testing the wrong lines.
+    Anchored on text rather than line numbers so an edit elsewhere in the file cannot
+    silently shift the window and leave this testing the wrong lines. A missing anchor is
+    fatal rather than an empty match, because a test that quietly runs nothing passes.
     """
 
     with open(path) as f:
         lines = f.read().splitlines()
     try:
-        start = lines.index(TAIL_START)
+        first = lines.index(start)
     except ValueError:
-        raise SystemExit(f"{path}: no `dbd` tail found — anchor {TAIL_START!r} is gone")
-    for i in range(start, len(lines)):
-        if lines[i] == "}":
-            return "\n".join(lines[start:i])
-    raise SystemExit(f"{path}: `dbd` tail never closes")
+        raise SystemExit(f"{path}: anchor {start!r} is gone from the `dbd` function")
+    for i in range(first + 1, len(lines)):
+        if lines[i] == end:
+            return "\n".join(lines[first:i])
+    raise SystemExit(f"{path}: {start!r} is never closed by {end!r}")
+
+
+def extract_tail(path=ZSHRC):
+    """The armed-run block: from the `cd` to the function's own closing brace."""
+
+    return extract(TAIL_START, "}", path)
+
+
+def as_function(body, repo, name="block"):
+    """`body` wrapped as a zsh function taking $repo — these blocks declare `local`."""
+
+    return f'{name}() {{\n  local repo="$1"\n{body}\n}}\n{name} "{repo}"\n'
 
 
 def make_repo():
@@ -104,8 +127,7 @@ def run_dbd_tail(repo, interrupt=True, env=None, timeout=15.0):
 
     script = os.path.join(repo, "run.zsh")
     with open(script, "w") as f:
-        f.write("dbd_tail() {\n  local repo=\"$1\"\n" + extract_tail() + "\n}\n"
-                f'dbd_tail "{repo}"\n')
+        f.write(as_function(extract_tail(), repo, "dbd_tail"))
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -142,6 +164,68 @@ def armed_log(repo):
         return None, ""
     with open(os.path.join(repo, names[0])) as f:
         return names[0], f.read()
+
+
+def run_pending_block(repo):
+    """Run the launch-time notice block. No pty: no signal is involved in this one."""
+
+    script = os.path.join(repo, "pending.zsh")
+    with open(script, "w") as f:
+        f.write(as_function(extract(PENDING_START, PENDING_END), repo, "pending_block"))
+    return subprocess.run(["zsh", "-f", script], capture_output=True, text=True,
+                          timeout=30)
+
+
+def test_the_launch_notice_names_what_is_waiting():
+    """The after-run review is the only chance those frames get, and a run that never
+    reaches it leaves them on a full volume with nothing ever mentioning them again."""
+
+    repo = make_repo()
+    try:
+        os.makedirs(os.path.join(repo, "frames", "bout_00"))
+        done = run_pending_block(repo)
+        check("the notice appears before the stream starts",
+              "2 unreviewed bouts (40 MB)" in done.stdout, repr(done.stdout))
+        check("and says how to act on it",
+              "tools/review_recordings.py" in done.stdout, repr(done.stdout))
+    finally:
+        shutil.rmtree(repo)
+
+
+def test_the_launch_notice_is_silent_when_nothing_is_waiting():
+    """The normal evening. A line printed every time is a line nobody reads."""
+
+    repo = make_repo()
+    try:
+        os.makedirs(os.path.join(repo, "frames"))       # present, empty
+        done = run_pending_block(repo)
+        check("an empty frames/ prints nothing", done.stdout == "", repr(done.stdout))
+        shutil.rmtree(os.path.join(repo, "frames"))
+        done = run_pending_block(repo)
+        check("and no frames/ at all prints nothing too",
+              done.stdout == "", repr(done.stdout))
+    finally:
+        shutil.rmtree(repo)
+
+
+def test_a_broken_check_warns_and_plays_on():
+    """A notice that fails SILENTLY is worse than none — it reads as "nothing is waiting"
+    forever, which is the exact failure it was added to end. And it must never block a
+    launch: whatever is wrong with the review tool, the match still gets to happen."""
+
+    repo = make_repo()
+    try:
+        with open(os.path.join(repo, ".venv/bin/python"), "w") as f:
+            f.write("#!/bin/sh\necho 'ModuleNotFoundError: dbd' >&2\nexit 1\n")
+        done = run_pending_block(repo)
+        check("the failure is reported", "could not check for unreviewed bouts"
+              in done.stderr, repr(done.stderr))
+        check("with the error itself, not just a shrug",
+              "ModuleNotFoundError" in done.stderr, repr(done.stderr))
+        check("nothing is claimed on stdout", done.stdout == "", repr(done.stdout))
+        check("and the launch is not blocked", done.returncode == 0, done.returncode)
+    finally:
+        shutil.rmtree(repo)
 
 
 def test_ctrl_c_reaches_the_review_step():

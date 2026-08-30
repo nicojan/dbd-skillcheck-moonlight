@@ -234,9 +234,12 @@ Then pick what to keep. **Everything starts unchecked** — keeping is the delib
 ```bash
 .venv/bin/python tools/review_recordings.py            # the TUI
 .venv/bin/python tools/review_recordings.py --list     # print and exit, changes nothing
+.venv/bin/python tools/review_recordings.py --pending  # one line if any are waiting, else silence
 ```
 
 **`dbd` opens the TUI itself when the armed run ends**, so you review while the match is still in your head — which bout was the Doctor is not a question a timestamp answers a week later. `DBD_NO_REVIEW=1` skips it. It runs from the shell function rather than from inside `autorun`, deliberately: the armed process holds the hot loop and a curses screen has no business in it.
+
+**Why after the match and not at launch.** The TUI's only job is answering "which of these was worth keeping", and that answer lives in your head for about an hour — run at launch you would be reviewing *last night's* bouts, cold, and everything starts unchecked, so a review you cannot answer keeps nothing. Launch is also the worst moment to hold the terminal: the wait exists so the stream can settle, and the next thing you must do is focus Moonlight. What launch gets instead is a **notice, never a prompt** — one line if bouts are waiting from a run that never reached its review, and complete silence otherwise (`review_recordings.py --pending`). That is the other side of the same failure: the after-run TUI is the only chance those frames get, and on 2026-08-29 a run that missed it left four bouts and 993 MB unnoticed on a 92%-full volume.
 
 **Ctrl-C is the supported way to end a run, and it takes two traps in `dbd` to survive.** An untrapped SIGINT aborts the whole zsh function, so the TUI above never opens; and `tee` sits in the same foreground process group, takes the same signal, and dies before `autorun`'s shutdown block — landing tally and recorder drop count — can write, so it is lost from the terminal *and* the log. Both happened live on 2026-08-29. `trap ':' INT` around the armed run and `trap '' INT` inside `tee`'s subshell fix it, and `tools/test_dbd_shell.py` pins it by extracting that block out of `~/.zshrc` and Ctrl-C'ing it in a real pty.
 
@@ -278,7 +281,7 @@ Twenty-seven small programs, all but the runner offline and replayable against r
 | `review_recordings.py` | the TUI that tallies recorded bouts and keeps only the ones you check off |
 | `test_clip_recorder.py` | tests the ring buffer, the bout gap rule, the no-double-write rule and drop-on-saturation |
 | `test_review_recordings.py` | tests what moves bouts, and drives the TUI in a real pty for the key handling |
-| `test_dbd_shell.py` | extracts the armed-run tail of the `dbd` shell function out of `~/.zshrc` and Ctrl-Cs it in a real pty: the review TUI must still open and the shutdown summary must still reach the log |
+| `test_dbd_shell.py` | extracts the `dbd` shell function's blocks out of `~/.zshrc` and runs them: Ctrl-C in a real pty must still open the review TUI and still reach the log, and the launch-time pending notice must stay silent when nothing is waiting and warn rather than hide when it cannot tell |
 | `analyse_needle.py` | needle angle per frame, and how constant the sweep rate is |
 | `measure_zone.py` | Great and Good widths straight from the drawn pixels |
 | `sweep_rates.py` | per-check rate and fit quality across a whole session |
