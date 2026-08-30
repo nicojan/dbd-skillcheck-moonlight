@@ -41,6 +41,8 @@ Working: window targeting, focus gating, detection, key delivery through Moonlig
 
 **Updated 2026-08-24 (late). The aim is 4.5 deg, clamped to the success zone, and misses go 12 -> 3 over 878 fires.** The `great_width / 4` clamp that had held the bias at 2.5 bounds the shot to the *Great band*, which is the wrong bound once a good beats a miss — the zone's trailing edge is 44 deg away where the Great band's is 5. The "no-fire risk" cited as the other reason not to go further is sign-inverted (a later target leaves *more* deadline slack) and empirically vacuous (0 of 77 no-presses are deadline-related). All-time under the shipped policy: **878 gradeable fires, 530 Great (60.4%), 345 good, 3 MISS.** The Great rate is deliberately 16 points lower than it was; the failure rate is a quarter of what it was. **Zero misses is not reachable** — 4.29 of the 5.32 deg landing spread sits *within* bursts seconds apart, where the link cannot have moved. **New failure mode: a late miss is possible above 3.0 deg bias**, where "nothing has ever missed late" held for 654 fires. See the top of *Resume here*.
 
+**Updated 2026-08-29. The aim of 4.5 deg is confirmed live, and the Madness gap is finally measured: 9 off-centre checks in one Doctor match, 6 of them SNAP OUT OF IT.** Two results from one evening, one armed and one recorded, because the two cannot run in the same session. Armed: **114 logged checks, 92 predictive fires, 56 GREAT / 31 good / 1 MISS — and that miss was EARLY** (settled 216.5 deg against a zone starting 218.0). **Zero late misses**, so the new failure mode the 4.5 change was expected to create did not appear across a full session and the staged fallback to 3.0 is not needed. Recorded: one Doctor match at 34330 frames / 8.66 GB, swept with `scan_frames.py` at 153 tiles/frame, yielding **nine distinct off-centre checks, all nine confirmed by eye in `hits/`, zero false positives**. **Six of the nine are SNAP OUT OF IT** — the Madness-cure action, which exists only against a Doctor and which the bot has no coverage of whatsoever; the other three are ordinary gen repair checks displaced by Madness. The production 224 crop sees nothing, or a corner sliver, of each. **This is a capture-region problem, not a tuning one** — no lead or bias value reaches a check whose pixels are never captured. See the top of *Resume here*.
+
 **A third session supports 60 ms.** `landings-20260820-192920.jsonl`, 9 fires at lead 60, 5 gradeable: **4 GREAT, 1 good, 0 MISS**, errors +8.0 / +5.0 / +3.0 / +0.5 / -3.0, trip median 66.2. Small, but it lands the same way the rescore predicted and it is mildly late (mean +2.7), which is the direction that makes 65 ms worth its own session rather than a worse idea. It also carries **4 `no press` outcomes in 9 fires**, which is the other open question — whether those drops are the operator's own space bar — and n is far too small to read anything into it.
 
 **Which Moonlight leg holds the 11 ms is the one open question, and it decides step 8 (2026-08-17).** Replaying recorded checks uses the recordings' real capture timestamps, so live frame-arrival jitter is included and only the *input* path is absent — and it scores **sigma ~1.0 deg** against **3.8 deg** live. So ~3.7 deg / 11 ms arises between deciding and the needle stopping, and it is not our fitting. By elimination that is the input leg, which is what the deferred host-side `SendInput` agent addresses — but it is elimination, not measurement, and `tail_read` cannot close it (see the finding below). Two cheap discriminators, one match each, in order:
@@ -48,7 +50,7 @@ Working: window targeting, focus gating, detection, key delivery through Moonlig
 1. **Run the host game at 120 fps.** If the game samples input once per rendered frame, 60 Hz contributes `16.7/sqrt(12)` = **4.8 ms** on its own — 2.3 of the 3.7 deg, and the largest single identified term. A settings change, not a build.
 2. **Change Moonlight bitrate or decoder and re-run.** If sigma moves, the video leg is corrupting the current-angle estimate and step 8 will not help. If it does not move, step 8 is justified on jitter — which matters, because it lost its original justification when lost presses were ruled out.
 
-Not working: off-centre Doctor checks (outside the capture crop). **Merciless Storm was listed here as a "deliberate abstention" until 2026-08-20; that was the tracker's behaviour, not the bot's — it presses reactively on every revolution. See "Resume here".**
+Not working: off-centre Doctor checks (outside the capture crop) — **measured 2026-08-29 at 9 checks in one match, 6 of them SNAP OUT OF IT; a 560x560 capture region at the crop origin + (-64, -204) covers all nine. See "Resume here".** **Merciless Storm was listed here as a "deliberate abstention" until 2026-08-20; that was the tracker's behaviour, not the bot's — it presses reactively on every revolution. See "Resume here".**
 
 **The reason is now settled, and it is not a tuning problem.** The Great band is 10-20 degrees wide and the needle sweeps at 327-609 deg/s, so the window is **16-61 ms** — always *narrower* than the ~72 ms keypress-to-pixel round trip. Reacting to a Great cannot work, in any configuration, because the needle has already left by the time the key lands. `--hit-ante` was never going to fix it. The only path to Great is to **predict** where the needle will be and press early.
 
@@ -56,7 +58,31 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 ## Resume here
 
-Read this section first; it is the state as of 2026-08-24.
+Read this section first; it is the state as of 2026-08-29.
+
+**2026-08-29 (19:40): the Madness gap is measured, and the fix is a wider capture region rather than any policy change.** One Doctor match recorded solo — `frames/session_20260829_154535`, 34330 frames / 8.66 GB, 35.4 fps effective, **0 gaps over 100 ms** (median 27.3, p99 32.4, max 72.8), which is nothing like the 2026-08-19 starvation profile and confirms the recorder is healthy when it is the only `mss` client. Swept with `tools/scan_frames.py` at 153 tiles/frame, ~3.5 hours at 2.6-3.3 fps.
+
+**Nine distinct off-centre checks, every one confirmed by eye, zero false positives.** Frames 1300, 3750, 4438, 5770, 5945, 18475, 21925, 22147, 26018 in `hits/`. Their offsets from the production 224 crop's origin:
+
+| frame | action | offset | what the crop sees |
+|---|---|---|---|
+| 1300 | SNAP OUT OF IT | (160, 132) | corner sliver |
+| 3750 | repair | (160, 132) | nothing |
+| 4438 | repair (gen) | (160, -92) | bottom-left arc |
+| 5770 | SNAP OUT OF IT | (160, 20) | left sliver |
+| 5945 | SNAP OUT OF IT | (-64, 132) | corner sliver |
+| 18475 | SNAP OUT OF IT | (-64, 132) | corner sliver |
+| 21925 | SNAP OUT OF IT | (48, 132) | corner only |
+| 22147 | SNAP OUT OF IT | (160, 20) | nothing |
+| 26018 | repair (gen) | (160, -92) | nothing |
+
+**Six of the nine are SNAP OUT OF IT**, the Madness-cure action that exists only against a Doctor. The bot has no coverage of it at all — this is a blind spot in the capture region, not a tuning gap, and no lead or aim value reaches a check whose pixels are never captured. The other three are ordinary gen repair checks displaced by Madness.
+
+**A 560x560 region at the crop origin + (-64, -204) covers all nine and contains the current 224 crop.** That is 16 tiles at stride 112, against the 153 a full-frame sweep needs (~3 fps, unusable live); wide capture itself was already measured at +4.7 ms. Tiling only the 8 observed positions is cheaper still if they hold up. **Rejected: learning a per-location offset** — frames 5770 and 5945 are the same map spot displaced in opposite directions, so displacement is not a function of position. **Unverified: n = 1 match, one map, and nothing is implemented.**
+
+Two trustworthiness notes on the sweep itself. **`scan_frames.py`'s `--min-advance-deg` filter is sound** — 9 of 9 of its multi-frame off-centre runs were genuine; do not loosen it. But **its headline count over-states**: it tallies check-like runs *per tile*, and one check straddles 2-3 tiles at 50% overlap, so its "13 off-centre checks" is 13 detections of 9 events — and one of the 13 was also seen by a centre tile, so it is not a miss at all. And **do not filter candidate runs by duration**: a 25-frame cutoff dropped the confirmed 22-frame SNAP check at 5763-5784, which is exactly the silent-rejection failure mode described at the *tile centre vs check centre* finding below, reproduced by hand rather than by the tool.
+
+**2026-08-29 (15:44): the 4.5 deg aim is confirmed live and 3.0 is not needed.** The 2026-08-24 change had never been played. Over 114 logged checks / 92 predictive fires: **56 GREAT, 31 good, 1 MISS, and the miss was EARLY** (settled 216.5 deg, zone starting 218.0). The staged rule was "more than one LATE miss in a session, drop to 3.0"; there were **zero**. The check log's live write path is also confirmed by the same files — `autorun.py` wrote 16 `checks/checks-*.jsonl` files, rotating on quiet, including 17 `"path": "reactive"` records.
 
 **2026-08-24 (21:45): the aim is 4.5 deg and clamped to the SUCCESS ZONE, not the Great band. Misses go 12 -> 3 over 878 fires.** Nico asked for this to stop missing. It cannot stop entirely — see the floor below — but the thing holding it at 2.5 deg was two errors, not physics, and both pointed the same way.
 
