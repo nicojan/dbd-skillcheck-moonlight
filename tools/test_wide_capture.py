@@ -26,6 +26,7 @@ from dbd.utils.needle_tracker import CENTRE_PRIOR
 from dbd.utils.wide_capture import (
     NONE_CLASS,
     OffCentreCrop,
+    SweepTally,
     centre_slice,
     look,
     wide_geometry,
@@ -321,6 +322,98 @@ def test_the_loop_restarts_the_track_when_the_crop_moves():
     # Samples before each observe: 0, 1 for the centre pair; then the crop moves, so the
     # off-centre pair must start from 0 again rather than continuing at 2, 3.
     check("the track restarted when the crop moved", starts == [0, 1, 0, 1], starts)
+    # And the same run reports what the sweep did, which is the only place that number
+    # ever appears: 8 frames, the two centre ones read at the centre, the third swept and
+    # locked, and the lock then held through frame four and the three quiet frames after
+    # it — a gap does not release a lock, the tracker dropping the track does.
+    line = next((q.strip() for q in printed if q.strip().startswith("wide:")), None)
+    check("the run reports what the sweep did",
+          line == "wide: 2 of 8 frames swept, 1 ring (50% of sweeps), "
+                  "1 locked off-centre, 5 frames read off-centre", line)
+
+
+
+# --- what the sweep reports about itself ---------------------------------------------
+
+def test_each_path_says_what_the_sweep_did():
+    """The flags are the tally's only input, so each of them is pinned to a real path."""
+
+    geometry = wide_geometry(content())
+    x, y = geometry.centre
+
+    centred = np.zeros((geometry.side, geometry.side, 3), dtype=np.uint8)
+    centred[y + 10:y + 20, x + 10:x + 20] = 150
+    seen = look(Recorder({150: (1, "repair-heal (out)", False)}), centred, geometry)
+    check("a centred check never sweeps", not seen.swept and not seen.ring)
+
+    quiet = np.zeros((geometry.side, geometry.side, 3), dtype=np.uint8)
+    seen = look(Recorder({}), quiet, geometry)
+    check("an empty frame sweeps and finds nothing", seen.swept and not seen.ring)
+
+    decoy = ringed(geometry, (500, 470), 220)
+    seen = look(Recorder({}), decoy, geometry)          # a ring the model does not confirm
+    check("an unconfirmed ring is a ring, not a lock",
+          seen.swept and seen.ring and seen.held is None)
+
+    seen = look(Recorder({220: (1, "repair-heal (out)", False)}), decoy, geometry)
+    check("a confirmed ring is the lock the tally counts",
+          seen.swept and seen.ring and seen.held is not None)
+
+    stolen = OffCentreCrop(origin=(0, 243), prior=CENTRE_PRIOR, ring_r=65.0)
+    seen = look(Recorder({150: (1, "repair-heal (out)", False)}), centred, geometry, stolen)
+    check("dropping a lock to the centre is reported",
+          seen.rescued and not seen.swept, (seen.rescued, seen.swept))
+
+
+def test_the_tally_counts_a_run_and_says_so():
+    geometry = wide_geometry(content())
+    x, y = geometry.centre
+    centred = np.zeros((geometry.side, geometry.side, 3), dtype=np.uint8)
+    centred[y + 10:y + 20, x + 10:x + 20] = 150
+    quiet = np.zeros((geometry.side, geometry.side, 3), dtype=np.uint8)
+    decoy = ringed(geometry, (500, 470), 220)
+    check_here = Recorder({150: (1, "repair-heal (out)", False),
+                           220: (1, "repair-heal (out)", False)})
+
+    tally = SweepTally()
+    for _ in range(3):
+        tally.add(look(check_here, centred, geometry))              # centred, no sweep
+    for _ in range(4):
+        tally.add(look(Recorder({}), quiet, geometry))              # swept, no ring
+    tally.add(look(Recorder({}), decoy, geometry))                  # ring, no lock
+    locked = tally.add(look(check_here, decoy, geometry))           # ring, locked
+    tally.add(look(check_here, decoy, geometry, locked.held))       # read off-centre
+    tally.add(look(check_here, centred, geometry, locked.held))     # lock dropped
+
+    check("frames", tally.frames == 11, tally.frames)
+    check("sweeps", tally.swept == 6, tally.swept)
+    check("rings", tally.rings == 2, tally.rings)
+    check("locks", tally.locks == 1, tally.locks)
+    check("frames read off-centre", tally.offcentre == 2, tally.offcentre)
+    check("rescues", tally.rescues == 1, tally.rescues)
+
+    line = tally.summary()
+    check("the line names every number that is not zero",
+          all(part in line for part in ("6 of 11 frames swept", "2 rings", "1 locked",
+                                       "2 frames read off-centre", "1 lock dropped")),
+          line)
+
+
+def test_a_quiet_run_says_the_sweep_never_ran():
+    """Silence is the thing being fixed, so "nothing happened" has to be said out loud."""
+
+    geometry = wide_geometry(content())
+    x, y = geometry.centre
+    centred = np.zeros((geometry.side, geometry.side, 3), dtype=np.uint8)
+    centred[y + 10:y + 20, x + 10:x + 20] = 150
+
+    tally = SweepTally()
+    for _ in range(5):
+        tally.add(look(Recorder({150: (1, "repair-heal (out)", False)}), centred, geometry))
+    check("a run with no sweep says so", "the sweep never ran" in tally.summary(),
+          tally.summary())
+    check("and a run with no frames does not divide by zero",
+          SweepTally().summary() == "wide: no frames looked at", SweepTally().summary())
 
 
 def main():

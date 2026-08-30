@@ -296,6 +296,12 @@ class Look:
     origin: Tuple[int, int]                # where that crop was taken from, in the box
     held: Optional[OffCentreCrop]          # set once an off-centre check is locked on
     inferences: int                        # classifier calls made, for the frame budget
+    # What the sweep did, stated rather than inferred. A caller CAN work most of this out
+    # from `held` and `inferences`, but not all of it — a rescue and a fresh lock both cost
+    # two inferences — and the point of a tally is that it is not guesswork.
+    swept: bool = False                    # the ring sweep ran on this frame
+    ring: bool = False                     # ...and it proposed a crop
+    rescued: bool = False                  # a lock was dropped because the centre had it
 
     @property
     def prior(self):
@@ -352,7 +358,8 @@ def look(predict, wide, geometry, held=None):
         centre = to_model_size(centre_slice(wide, geometry))
         c_pred, c_desc, c_probs, c_hit = predict(centre)
         if c_pred != NONE_CLASS:
-            return Look(c_pred, c_desc, c_probs, c_hit, centre, geometry.centre, None, 2)
+            return Look(c_pred, c_desc, c_probs, c_hit, centre, geometry.centre, None, 2,
+                        rescued=True)
 
         # Both empty. Keep the lock: a one or two frame gap mid-check is normal, and
         # re-sweeping would move the crop and restart the track for nothing. The caller's
@@ -366,14 +373,76 @@ def look(predict, wide, geometry, held=None):
 
     found = locate_offcentre(wide, geometry)
     if found is None:
-        return Look(pred, desc, probs, should_hit, centre, geometry.centre, None, 1)
+        return Look(pred, desc, probs, should_hit, centre, geometry.centre, None, 1,
+                    swept=True)
 
     crop = crop_at(wide, found.origin, geometry)
     off_pred, off_desc, off_probs, off_hit = predict(crop)
     if off_pred == NONE_CLASS:
-        return Look(pred, desc, probs, should_hit, centre, geometry.centre, None, 2)
+        return Look(pred, desc, probs, should_hit, centre, geometry.centre, None, 2,
+                    swept=True, ring=True)
 
-    return Look(off_pred, off_desc, off_probs, off_hit, crop, found.origin, found, 2)
+    return Look(off_pred, off_desc, off_probs, off_hit, crop, found.origin, found, 2,
+                swept=True, ring=True)
+
+
+def _plural(count, word):
+    return f"{count} {word}" + ("" if count == 1 else "s")
+
+
+class SweepTally:
+    """What the ring sweep actually did over a run, so a match can report it.
+
+    The sweep is otherwise SILENT. Nothing in an armed log distinguishes a frame read from
+    a re-centred crop from one read at the centre, so a whole Doctor match could go by
+    without saying whether the off-centre path did any work at all — and that path is the
+    entire reason the box is 672 px wide. The 2026-08-30 match ran 105 predictive fires
+    and could not answer it.
+
+    Counting is deliberately per-frame and additive; the only cross-frame fact wanted here
+    is a LOCK, which is a fresh sweep that classified, and `look` reports that in the frame
+    it happens (`ring` and `held` both set), so no state has to be carried.
+    """
+
+    def __init__(self):
+        self.frames = 0        # looks taken
+        self.swept = 0         # centre was empty, so the box was swept
+        self.rings = 0         # ...and the sweep proposed a crop
+        self.locks = 0         # ...and that crop classified as a check: an off-centre find
+        self.offcentre = 0     # frames read through a locked off-centre crop
+        self.rescues = 0       # locks dropped because the centre had the check after all
+
+    def add(self, look):
+        """Fold one `Look` in. Returns it, so a caller can tally inside an expression."""
+
+        self.frames += 1
+        self.swept += look.swept
+        self.rings += look.ring
+        self.locks += look.ring and look.held is not None
+        self.offcentre += look.held is not None
+        self.rescues += look.rescued
+        return look
+
+    def summary(self):
+        """One line, and it must read as plainly when the sweep did nothing at all.
+
+        A quiet run is the expected case — no Doctor, no Madness, nothing off-centre — and
+        "0 rings" said out loud is a result. Silence is what this class exists to end.
+        """
+
+        if not self.frames:
+            return "wide: no frames looked at"
+        if not self.swept:
+            return f"wide: {self.frames} frames, centre never empty — the sweep never ran"
+        share = 100.0 * self.rings / self.swept
+        line = (f"wide: {self.swept} of {self.frames} frames swept, "
+                f"{_plural(self.rings, 'ring')} ({share:.0f}% of sweeps), "
+                f"{self.locks} locked off-centre")
+        if self.offcentre:
+            line += f", {self.offcentre} frames read off-centre"
+        if self.rescues:
+            line += f", {_plural(self.rescues, 'lock')} dropped to the centre"
+        return line
 
 
 def to_model_size(crop, crop_size=int(TRAINING_REFERENCE_CROP)):

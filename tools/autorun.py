@@ -42,7 +42,7 @@ from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.clip_recorder import (DEFAULT_GAP_SECONDS, DEFAULT_MAX_GB,
                                      DEFAULT_POST_SECONDS, DEFAULT_PRE_SECONDS,
                                      ClipRecorder)
-from dbd.utils.wide_capture import Monitoring_wide, crop_at, look
+from dbd.utils.wide_capture import Monitoring_wide, SweepTally, crop_at, look
 from check_log import ROTATE_GAP_SECONDS, CheckLog, reactive_record
 from dbd.utils.needle_tracker import (
     AIM_BIAS_DEG, CENTRE_PRIOR, ROUND_TRIP_MS, Reading, TrackerState, aim_bias_for,
@@ -773,6 +773,10 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
 
 
 def run(args):
+    # The sweep is silent frame to frame, so the run has to keep its own count and say so
+    # at shutdown — otherwise "did the wide box do anything tonight?" is unanswerable from
+    # a log, which is exactly what happened to the 2026-08-30 match.
+    sweeps = SweepTally()
     capture = Monitoring_wide if args.wide else Monitoring_window
     monitoring = capture(
         window_query=args.window,
@@ -976,8 +980,8 @@ def run(args):
                 # One grab of the wide box; the centre 224 is a slice of it, so the fast
                 # path is the same pixels from the same instant it always was. `look`
                 # sweeps the rest of the box only when that centre slice is empty.
-                seen = look(predict_bgr, monitoring.grab_wide(),
-                            monitoring.geometry, held)
+                seen = sweeps.add(look(predict_bgr, monitoring.grab_wide(),
+                                       monitoring.geometry, held))
                 pred, desc, probs, should_hit = (seen.pred, seen.desc, seen.probs,
                                                  seen.should_hit)
                 frame_bgr = seen.crop
@@ -1163,6 +1167,8 @@ def run(args):
         if landing_log is not None:
             log(f"  {landing_log.written} freeze watches recorded in {landing_log.path}")
             landing_log.close()
+        if args.wide:
+            log("  " + sweeps.summary())
         if recorder is not None:
             recorder.close()
             log(f"  {recorder.summary()} in {recorder.root}/ — "
