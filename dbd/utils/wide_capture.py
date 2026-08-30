@@ -435,3 +435,22 @@ class Monitoring_wide(Monitoring_window):
         from PIL import Image
 
         return Image.fromarray(self.get_frame_np())
+
+
+def geometry_from_describe(meta):
+    """Rebuild a `WideGeometry` from its own `describe()` output.
+
+    A recorded bout stores the geometry it was cropped with rather than letting a reader
+    re-derive one from the image — the frames ARE the wide box, so there is nothing left
+    in them to derive it from. See `dbd/utils/bout_session.py`.
+    """
+
+    return WideGeometry(
+        region=dict(meta["wide_region"]),
+        crop_region=dict(meta["crop_region"]),
+        centre=tuple(meta["centre_in_box"]),
+        side=int(meta["side"]),
+        crop_side=int(meta["crop_side"]),
+        scale=float(meta["scale"]),
+        clamped=bool(meta["clamped"]),
+    )

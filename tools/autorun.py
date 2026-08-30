@@ -39,6 +39,9 @@ from dbd.AI_model import AI_model
 from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
+from dbd.utils.clip_recorder import (DEFAULT_GAP_SECONDS, DEFAULT_MAX_GB,
+                                     DEFAULT_POST_SECONDS, DEFAULT_PRE_SECONDS,
+                                     ClipRecorder)
 from dbd.utils.wide_capture import Monitoring_wide, crop_at, look
 from check_log import ROTATE_GAP_SECONDS, CheckLog, reactive_record
 from dbd.utils.needle_tracker import (
@@ -297,6 +300,20 @@ def parse_args(argv=None):
     p.add_argument("--no-wide", dest="wide", action="store_false",
                    help="grab only the 224 centre crop, as before. Off-centre Doctor "
                         "checks are then invisible again — see dbd/utils/wide_capture.py")
+    p.add_argument("--record", action="store_true",
+                   help="keep the wide frames around each check, in gap-separated bouts "
+                        "under frames/. Costs one deque append per frame; review and "
+                        "prune with tools/review_recordings.py")
+    p.add_argument("--record-pre", type=float, default=DEFAULT_PRE_SECONDS,
+                   help="seconds of lead-in kept before each check (ring buffer)")
+    p.add_argument("--record-post", type=float, default=DEFAULT_POST_SECONDS,
+                   help="seconds kept after each check")
+    p.add_argument("--record-gap", type=float, default=DEFAULT_GAP_SECONDS,
+                   help="quiet seconds that end a bout; five minutes means one bout is "
+                        "about one match")
+    p.add_argument("--record-max-gb", type=float, default=DEFAULT_MAX_GB,
+                   help="stop recording after this much on disk, so a long session "
+                        "cannot fill the volume mid-match")
     return p.parse_args(argv)
 
 
@@ -785,8 +802,32 @@ def run(args):
     # this one gets drained by `pull_check_stats.py` and that one never does.
     check_log = CheckLog() if args.check_log_enabled and not args.dry_run else None
 
+    # Recording rides on the grab the armed loop already takes — no second capture client,
+    # because two of those mutually starve on macOS (NOTES-local.md, 2026-08-20).
+    recorder = None
+    if args.record:
+        if not args.wide:
+            sys.exit("--record needs the wide grab; drop --no-wide")
+        recorder = ClipRecorder(
+            content=monitoring.content,
+            geometry=monitoring.geometry.describe(),
+            pre_seconds=args.record_pre,
+            post_seconds=args.record_post,
+            gap_seconds=args.record_gap,
+            max_gb=args.record_max_gb,
+        )
+        log(f"recording: {args.record_pre:.1f}s before / {args.record_post:.1f}s after "
+            f"each check, new bout after {args.record_gap:.0f}s quiet, "
+            f"cap {args.record_max_gb:.0f} GB")
+
     def record_check(record, path_taken):
         """Put one check in the queue, announcing a new bout when the gap rule fires."""
+
+        # Before the check-log guard on purpose: recording is not conditional on the
+        # queue being enabled, and --no-check-log must not silently stop it.
+        if recorder is not None:
+            recorder.trigger({"at": record.get("at"), "desc": record.get("desc"),
+                              "path": path_taken})
 
         if check_log is None:
             return
@@ -943,6 +984,10 @@ def run(args):
                 if crop_origin is not None and seen.origin != crop_origin:
                     tracker, track_t0 = None, None
                 crop_origin, held = seen.origin, seen.held
+                if recorder is not None:
+                    # The frame `look` just used, not a second grab. A deque append in the
+                    # quiet case; encoding happens on writer threads only for kept frames.
+                    recorder.offer(monitoring.last_wide, captured)
             else:
                 frame_bgr = model.grab_screenshot()[:, :, ::-1]
                 pred, desc, probs, should_hit = predict_bgr(frame_bgr)
@@ -1114,6 +1159,10 @@ def run(args):
         if landing_log is not None:
             log(f"  {landing_log.written} freeze watches recorded in {landing_log.path}")
             landing_log.close()
+        if recorder is not None:
+            recorder.close()
+            log(f"  {recorder.summary()} in {recorder.root}/ — "
+                f"review and prune with tools/review_recordings.py")
         if check_log is not None:
             log(f"  {check_log.total} checks queued across {check_log.files} "
                 f"bout(s) in {check_log.directory}/ — "

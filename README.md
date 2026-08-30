@@ -204,13 +204,42 @@ Do not reach for `--round-trip-ms` first. Run `tools/rescore_policy.py` instead:
 
 **The bug this ladder was built to find, for the record.** `fire()` took its wait in *seconds* while the predictive call site passed `decision.press_at_ms - now_ms` in *milliseconds*. Every predictive press therefore slept 1000x too long — a 20 ms lead became 20 seconds. It survived four armed matches because nothing else could see it: `--dry-run` returns before the sleep, the offline replay never sleeps, the reactive path passes 0, and the symptom it produced armed was `needle gone before it could be read`, which reads like a *detection* fault. The one check that ever produced a landing was the one whose remaining lead happened to be a fraction of a millisecond. `fire()` now takes milliseconds, says so in the parameter name, and `test_landing_report.py` pins the unit.
 
+### Recording while armed
+
+Until now it was arm **or** record, never both: `record_frames.py` opens a second `mss` client, and two concurrent clients on macOS 26.6 mutually starve on a ~30 s timeout — on 2026-08-20 the recorder flatlined to exactly one frame every 30.0 s and took the armed loop down with it. So every armed match was played blind, and whatever rare perk or state turned up in one is gone.
+
+`--record` fixes that by not adding a capture client at all. The armed loop already grabs a 672 px wide box every frame, and that grab already copies out of the mss buffer, so recording is just "keep the frames we already have":
+
+```bash
+.venv/bin/python tools/autorun.py --record
+```
+
+Measured cost of the hot-loop half: **0.21 us per frame**, 0.001% of a ~31 ms loop. It is a `deque.append`; nothing is encoded until a frame is actually kept.
+
+**It does not keep everything.** Continuous 672 capture is ~64 KB/frame, so ~2.0 MB/s and ~7.4 GB/hour, against 70 GB free on this machine — two evenings, nearly all of it floor and generator. Instead a ring buffer holds the last `--record-pre` seconds in memory and writes nothing until a check fires, then flushes the ring and keeps writing for `--record-post`. Every check lands with its lead-in intact at roughly a twentieth of the disk.
+
+**Bouts rotate on a gap, exactly as `CheckLog` does and for the same reason.** A new bout starts when no check has fired for `--record-gap` seconds, default 300, so one directory is one continuous stretch of play — about one match. A wall-clock rotation would cut a match in half and a size rotation would join two. The check log's own threshold stays at 60 s because its unit is a generator run, not a match.
+
+Then pick what to keep. **Everything starts unchecked** — keeping is the deliberate act, because the reason to record at all is the rare bout and a recorder that keeps everything buries it:
+
+```bash
+.venv/bin/python tools/review_recordings.py            # the TUI
+.venv/bin/python tools/review_recordings.py --list     # print and exit, changes nothing
+```
+
+SPACE keeps, `a` toggles all, `p` opens the middle frame so you can see what a bout was, ENTER applies. Applying moves every unchecked bout to `frames/discard/` and marks the kept ones reviewed so they do not come back. Discard is a **move, not a delete** — these frames are unrepeatable. `--empty-discard` is the only thing here that destroys anything.
+
+**A bout declares its own geometry, and this is load-bearing.** Its frames are 672 px boxes, not content rects, and the two readers in this repo both used to infer geometry from the image: `replay_centre_crop.session_geometry` took the first frame's shape *as* the content rect, and `scan_frames` sized its tile as `224 x height / 1080`. Hand either one a bout and it computes a plausible wrong answer in silence — a 672-tall "content rect" yields a 139 px tile and a wide box that is nowhere near any check. So every bout carries `bout.json` with `kind: "wide_bout"` plus the content rect and `WideGeometry` it was actually cropped with, and both readers branch on that marker instead of guessing. A directory without `bout.json` is a `record_frames.py` session and reads exactly as it always did.
+
+Verified end to end: a bout built from the known off-centre check at frame 3750 replays to the **same decision as its full-frame source** — FIRE predictive, aiming 169.5 deg, same five-frame classifier run — and `scan_frames` reads it at a 224 px tile with the check at 1.000.
+
 Upstream's Gradio web UI still runs through `python app.py`, with a `moonlight` capture backend added.
 
 Read this twice: EAC can treat injected input as an unfair advantage, and accounts get banned for it. Upstream restricts the tool to private games. This fork does nothing to improve those odds.
 
 ## Tools
 
-Twenty-four small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
+Twenty-five small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
 
 | Tool | What it does |
 |---|---|
@@ -230,7 +259,8 @@ Twenty-four small programs, all but the runner offline and replayable against re
 | `measure_latency.py` | keypress to pixel round trip |
 | `test_keypress.py` | isolates whether synthetic keys reach the host at all |
 | `record_checks.py` | clean 224-pixel frame sequences of individual checks |
-| `record_frames.py` | full frames at 30 fps with no inference, for offline work |
+| `record_frames.py` | full frames at 30 fps with no inference, for offline work. Cannot run while the bot is armed — use `autorun.py --record` |
+| `review_recordings.py` | the TUI that tallies recorded bouts and keeps only the ones you check off |
 | `analyse_needle.py` | needle angle per frame, and how constant the sweep rate is |
 | `measure_zone.py` | Great and Good widths straight from the drawn pixels |
 | `sweep_rates.py` | per-check rate and fit quality across a whole session |

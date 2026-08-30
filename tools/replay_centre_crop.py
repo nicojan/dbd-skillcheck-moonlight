@@ -62,7 +62,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 from dbd.AI_model import AI_model
 from dbd.utils.monitoring_window import TRAINING_REFERENCE_CROP, TRAINING_REFERENCE_HEIGHT
 from dbd.utils.needle_tracker import ROUND_TRIP_MS, TrackerState, decide, mark_fired, observe
-from dbd.utils.wide_capture import centre_slice, look, to_model_size, wide_geometry
+from dbd.utils import bout_session
+from dbd.utils.wide_capture import (centre_slice, geometry_from_describe, look,
+                                    to_model_size, wide_geometry)
 
 TRACKED_PREDS = (1, 2, 3, 4, 5, 6, 7)  # keep in step with autorun.py
 CROP = int(TRAINING_REFERENCE_CROP)  # the constant is a float, and cv2.resize wants ints
@@ -247,11 +249,25 @@ def replay_video(args, model):
 # than on the model.
 
 def session_geometry(session):
-    """Content rect and wide-box geometry for a recorded session.
+    """Content rect, wide-box geometry, and whether the frames are already the wide box.
 
-    The recorded JPEG *is* the content rect, so within the image the rect starts at the
-    origin — but its height still sets the scale, exactly as live.
+    Two recorders write session directories and they are indistinguishable by shape:
+
+      * `record_frames.py` writes the whole content rect. The recorded JPEG *is* the
+        content rect, so within the image the rect starts at the origin — but its height
+        still sets the scale, exactly as live, and the wide box is a slice of it.
+      * `clip_recorder.py` writes the 672 px wide box itself, already cropped, because
+        that is all the armed loop ever grabbed.
+
+    Inferring the content rect from the image shape is right for the first and silently
+    wrong for the second — a 672-tall "content rect" derives a wide box that is not where
+    any check is, and nothing complains. So a bout declares its own geometry and this
+    reads it rather than guessing. See `dbd/utils/bout_session.py`.
     """
+
+    meta = bout_session.load(session)
+    if meta is not None:
+        return dict(meta["content"]), geometry_from_describe(meta["geometry"]), True
 
     first = sorted(n for n in os.listdir(session) if n.lower().endswith((".jpg", ".png")))
     if not first:
@@ -261,7 +277,7 @@ def session_geometry(session):
         sys.exit(f"could not read {first[0]}")
     height, width = img.shape[:2]
     content = {"left": 0, "top": 0, "width": width, "height": height}
-    return content, wide_geometry(content)
+    return content, wide_geometry(content), False
 
 
 def frame_times(session, indices):
@@ -278,7 +294,8 @@ def frame_times(session, indices):
     return [(i, stamps.get(i)) for i in indices]
 
 
-def session_frames(session, indices, geometry, framing, tile=None):
+def session_frames(session, indices, geometry, framing, tile=None,
+                   pre_cropped=False):
     """(t_ms, crop) for a run of recorded frames, under one fixed framing.
 
     Two framings live here, both of which hand over a crop chosen without looking:
@@ -291,7 +308,7 @@ def session_frames(session, indices, geometry, framing, tile=None):
     """
 
     for index, t_ms in frame_times(session, indices):
-        wide = read_wide(session, index, geometry)
+        wide = read_wide(session, index, geometry, pre_cropped)
         if wide is None:
             continue
         if framing == "centre":
@@ -303,18 +320,24 @@ def session_frames(session, indices, geometry, framing, tile=None):
                                            x:x + geometry.crop_side])
 
 
-def read_wide(session, index, geometry):
-    """The wide box out of one recorded frame, or None if the frame is unreadable."""
+def read_wide(session, index, geometry, pre_cropped=False):
+    """The wide box out of one recorded frame, or None if the frame is unreadable.
+
+    `pre_cropped` says the recorded frame already IS the box, which is what a bout from
+    `clip_recorder.py` holds; slicing it again would cut a box out of a box.
+    """
 
     img = cv2.imread(os.path.join(session, f"{index:06d}.jpg"))
     if img is None:
         return None
+    if pre_cropped:
+        return img
     region = geometry.region
     return img[region["top"]:region["top"] + region["height"],
                region["left"]:region["left"] + region["width"]]
 
 
-def replay_wide(model, session, indices, geometry, lead_ms):
+def replay_wide(model, session, indices, geometry, lead_ms, pre_cropped=False):
     """The shipped wide path over a run of recorded frames. Returns (action, preds).
 
     Mirrors the armed loop the way `replay_stream` does, and goes through the same
@@ -327,7 +350,7 @@ def replay_wide(model, session, indices, geometry, lead_ms):
     tracker, t0, held, preds, prior, origin = None, None, None, [], None, None
 
     for index, t_ms in frame_times(session, indices):
-        wide = read_wide(session, index, geometry)
+        wide = read_wide(session, index, geometry, pre_cropped)
         if wide is None:
             continue
 
@@ -364,7 +387,7 @@ def replay_wide(model, session, indices, geometry, lead_ms):
 def replay_session(args, model):
     """Replay one framing over a run of recorded frames around each named frame."""
 
-    content, geometry = session_geometry(args.frames)
+    content, geometry, pre_cropped = session_geometry(args.frames)
     tile = tuple(int(v) for v in args.tile.split(",")) if args.tile else None
     if args.framing == "tile" and tile is None:
         sys.exit("--framing tile needs --tile X,Y (the grid origin, in content pixels)")
@@ -378,9 +401,10 @@ def replay_session(args, model):
         indices = range(max(centre_frame - args.before, 0), centre_frame + args.after + 1)
         if args.framing == "wide":
             action, preds, prior = replay_wide(model, args.frames, indices, geometry,
-                                               args.round_trip_ms)
+                                               args.round_trip_ms, pre_cropped)
         else:
-            stream = session_frames(args.frames, indices, geometry, args.framing, tile)
+            stream = session_frames(args.frames, indices, geometry, args.framing,
+                                    tile, pre_cropped)
             action, preds = replay_stream(model, stream, args.round_trip_ms)
             prior = None
         pressed += action != "NO PRESS"

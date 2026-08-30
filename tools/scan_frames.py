@@ -33,6 +33,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
 
 from dbd.AI_model import AI_model
+from dbd.utils import bout_session
 from dbd.utils.monitoring_mss import Monitoring
 from tools.analyse_needle import MIN_NEEDLE_STRENGTH
 
@@ -331,12 +332,29 @@ def main():
     height, width = first.shape[:2]
 
     # Tile sized the way the production crop is sized: the model was trained on checks
-    # occupying 224/1080 of the frame height, so the tile must track content height.
-    tile = max(int(round(MODEL_INPUT * height / TRAINING_REFERENCE_HEIGHT)), 8)
+    # occupying 224/1080 of the frame height, so the tile must track CONTENT height.
+    #
+    # For a `record_frames.py` session the image is the content rect and the two are the
+    # same number. For a bout from `clip_recorder.py` they are not: the image is a 672 px
+    # wide box cut from a 1080 px frame, and sizing off the image would give a 139 px tile
+    # — checks at the wrong scale, classified wrongly, with nothing to show it had gone
+    # wrong. The bout records the content rect it came from, so use that.
+    bout = bout_session.load(session)
+    content_height = bout["content"]["height"] if bout else height
+    tile = max(int(round(MODEL_INPUT * content_height / TRAINING_REFERENCE_HEIGHT)), 8)
     stride = max(int(round(tile * args.stride_frac)), 1)
     origins = tile_origins(width, height, tile, stride)
-    centre = (width // 2 - tile // 2, height // 2 - tile // 2)
+    if bout:
+        # Inside a bout the production crop is at a known offset in the box, not at the
+        # box's centre — the box is deliberately offset from the crop.
+        cx, cy = bout["geometry"]["centre_in_box"]
+        centre = (int(cx), int(cy))
+    else:
+        centre = (width // 2 - tile // 2, height // 2 - tile // 2)
 
+    if bout:
+        log(f"bout: {width}x{height} wide box from {bout['content']['width']}x"
+            f"{content_height} content, {len(bout.get('checks', []))} checks")
     log(f"{len(frame_list)} frames at {width}x{height}")
     log(f"tile {tile}px (resized to {MODEL_INPUT} for the model), stride {stride}, {len(origins)} tiles/frame")
     log(f"production centre crop would sit at {centre}")
