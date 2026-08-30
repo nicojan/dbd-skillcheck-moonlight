@@ -812,6 +812,8 @@ def test_the_loop_actually_prints_the_no_press_line():
             pass
 
     saved = (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher, autorun.sleep)
+    # `--no-wide` on purpose: this test is about the NO PRESS line, and the 224 path is
+    # what StubWindow models. The wide path has its own loop test in test_wide_capture.py.
     autorun.AI_model = StubModel
     autorun.Monitoring_window = lambda **kw: StubWindow()
     autorun.FocusWatcher = lambda **kw: StubWatcher()
@@ -821,7 +823,7 @@ def test_the_loop_actually_prints_the_no_press_line():
     logdir = tempfile.mkdtemp()
     logpath = os.path.join(logdir, "landings-test.jsonl")
     try:
-        autorun.run(autorun.parse_args(["--landing-log", logpath]))
+        autorun.run(autorun.parse_args(["--no-wide", "--landing-log", logpath]))
     finally:
         (autorun.AI_model, autorun.Monitoring_window,
          autorun.FocusWatcher, autorun.sleep) = saved
@@ -927,7 +929,9 @@ def test_the_loop_actually_uses_the_shortened_lead():
     autorun.report_landing = stub_report_landing
     autorun.fire = lambda args, wait_ms: 0.0       # never touch the real keyboard
     try:
-        autorun.run(autorun.parse_args([]))
+        # `--no-wide`: this drives the lead rules through the 224 path StubWindow models.
+        # The wide path's own loop wiring is tested in test_wide_capture.py.
+        autorun.run(autorun.parse_args(["--no-wide"]))
     finally:
         (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
          autorun.sleep, autorun.decide, autorun.report_landing, autorun.fire) = saved

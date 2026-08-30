@@ -658,7 +658,13 @@ def observe(state, frame, t_ms):
     # centre per check. It is the same data.
     if not new.centre_fixed and new.seen >= MIN_ZONE_FRAMES:
         static = static_image(new.frames)
-        cx, cy, ring_r, _ = refine_centre(static)
+        # Refine about THIS check's prior, not the module's. For a centred check the two
+        # are the same constant and nothing changes; for a Madness check the caller has
+        # re-cropped about the ring it located and passes where that ring actually landed,
+        # which Hough only pins to a few pixels. Anchoring the search at (112, 102)
+        # regardless would search a spot the ring is not at, fail the peak test, and fall
+        # back to a prior in the background — rejecting the check silently.
+        cx, cy, ring_r, _ = refine_centre(static, prior=new.centre)
         new = replace(new, centre=(cx, cy), ring_r=ring_r, centre_fixed=True,
                       zone=find_zone(static, (cx, cy), ring_r))
         # The angles so far were measured about the prior, up to 3 px away. Re-measure

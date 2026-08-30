@@ -62,10 +62,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 from dbd.AI_model import AI_model
 from dbd.utils.monitoring_window import TRAINING_REFERENCE_CROP, TRAINING_REFERENCE_HEIGHT
 from dbd.utils.needle_tracker import ROUND_TRIP_MS, TrackerState, decide, mark_fired, observe
+from dbd.utils.wide_capture import centre_slice, look, to_model_size, wide_geometry
 
 TRACKED_PREDS = (1, 2, 3, 4, 5, 6, 7)  # keep in step with autorun.py
 CROP = int(TRAINING_REFERENCE_CROP)  # the constant is a float, and cv2.resize wants ints
 RING_ABOVE_CENTRE_PX = 10.0  # measured live: ring at y=101.75 in a 224 crop, not 112
+DEFAULT_FRAME_MS = 30.0      # fallback spacing when a recorded session has no manifest
 
 
 def centre_crop(bgr, side, offset_y):
@@ -79,28 +81,29 @@ def centre_crop(bgr, side, offset_y):
     return crop
 
 
-def replay_check(model, cap, check, fps, side, step, lead_ms, offset_y):
-    """What the armed loop would do on one check. Returns (action, prediction counts)."""
+def replay_stream(model, frames, lead_ms, prior=None):
+    """What the armed loop would do, given a stream of crops. Returns (action, preds).
 
-    cap.set(cv2.CAP_PROP_POS_FRAMES, check["frame0"])
+    `frames` yields (t_ms, crop_bgr) already at model size. `prior` is where the check's
+    ring sits inside those crops, in crop pixels — the tracker refines about it. Leave it
+    None for a centred check and the tracker's own constant is used.
+
+    This is the whole of the live decision: same TRACKED_PREDS gate, same observe/decide,
+    same may_react fallback. Both the video path and the recorded-frames path go through
+    it so neither can drift into answering a different question from the other.
+    """
+
     tracker, t0, preds = None, None, []
 
-    for i in range(check["frame0"], check["frame1"] + 1):
-        ok, bgr = cap.read()
-        if not ok:
-            break
-        if (i - check["frame0"]) % step:
-            continue
-
-        t_ms = (i - check["frame0"]) / fps * 1000.0
-        crop = centre_crop(bgr, side, offset_y)
+    for t_ms, crop in frames:
         pred, desc, _, should_hit = model.predict(crop[:, :, ::-1])  # predict wants RGB
         preds.append(desc)
 
         if pred not in TRACKED_PREDS:
             continue
         if tracker is None:
-            tracker, t0 = TrackerState(), t_ms
+            tracker = TrackerState() if prior is None else TrackerState(centre=prior)
+            t0 = t_ms
         tracker = observe(tracker, crop, t_ms - t0)
         decision = decide(tracker, t_ms - t0, lead_ms)
 
@@ -115,22 +118,27 @@ def replay_check(model, cap, check, fps, side, step, lead_ms, offset_y):
     return "NO PRESS", preds
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("events", help="recordings_video/<clip>/events.json")
-    p.add_argument("--model", default="models/model.onnx")
-    p.add_argument("--threads", type=int, default=4)
-    p.add_argument("--round-trip-ms", type=float, default=ROUND_TRIP_MS)
-    p.add_argument("--ring-above-centre", type=float, default=RING_ABOVE_CENTRE_PX,
-                   help="px a centred check's ring sits above the live crop centre; the crop "
-                        "is shifted down by this so the clip is framed as live frames it. "
-                        "0 crops the frame's geometric centre, which is NOT what live sees")
-    p.add_argument("--fps", type=float, default=0.0,
-                   help="feed frames at about this rate; 0 uses every frame. The live loop "
-                        "runs at 33-41 fps, so a 60 fps clip fed whole gives the tracker "
-                        "more samples than it will ever have")
-    args = p.parse_args()
+def video_frames(cap, check, fps, side, step, offset_y):
+    """(t_ms, centre crop) for one check in a source video."""
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, check["frame0"])
+    for i in range(check["frame0"], check["frame1"] + 1):
+        ok, bgr = cap.read()
+        if not ok:
+            return
+        if (i - check["frame0"]) % step:
+            continue
+        yield (i - check["frame0"]) / fps * 1000.0, centre_crop(bgr, side, offset_y)
+
+
+def replay_check(model, cap, check, fps, side, step, lead_ms, offset_y):
+    """What the armed loop would do on one check of a source video."""
+
+    return replay_stream(model, video_frames(cap, check, fps, side, step, offset_y), lead_ms)
+
+
+def replay_video(args, model):
+    """Every check in an ingested clip, cropped the way the live grab crops."""
 
     events = json.load(open(args.events))
     cap = cv2.VideoCapture(events["video"])
@@ -146,11 +154,7 @@ def main():
 
     print(f"{events['video']}  {width}x{height} @{fps:.1f}  centre crop {side} px -> "
           f"{CROP}  crop shifted {offset_y:+d} px  feeding {fps / step:.0f} fps  "
-          f"lead {args.round_trip_ms:.0f} ms")
-
-    model = AI_model(model_path=args.model, use_gpu=False,
-                     nb_cpu_threads=args.threads, monitoring=None)
-    print(f"provider: {model.check_provider()}\n")
+          f"lead {args.round_trip_ms:.0f} ms\n")
 
     pressed = 0
     for check in events["checks"]:
@@ -166,6 +170,203 @@ def main():
 
     print(f"{pressed} of {len(events['checks'])} checks would have been pressed")
     cap.release()
+
+
+
+# --- recorded frame sessions ---------------------------------------------------------
+#
+# `record_frames.py` captures the whole content rect, and `Monitoring_window` resolves that
+# same rect live, so a recorded session replays the live grab exactly — including the wide
+# box, which is a slice of it. This is the only way to ask "would the bot press here?" of a
+# Madness check: there is no clip of one, and the answer turns on capture geometry rather
+# than on the model.
+
+def session_geometry(session):
+    """Content rect and wide-box geometry for a recorded session.
+
+    The recorded JPEG *is* the content rect, so within the image the rect starts at the
+    origin — but its height still sets the scale, exactly as live.
+    """
+
+    first = sorted(n for n in os.listdir(session) if n.lower().endswith((".jpg", ".png")))
+    if not first:
+        sys.exit(f"no frames in {session}")
+    img = cv2.imread(os.path.join(session, first[0]))
+    if img is None:
+        sys.exit(f"could not read {first[0]}")
+    height, width = img.shape[:2]
+    content = {"left": 0, "top": 0, "width": width, "height": height}
+    return content, wide_geometry(content)
+
+
+def frame_times(session, indices):
+    """(index, t_ms) for a run of frames, using the recorder's own timestamps."""
+
+    path = os.path.join(session, "manifest.jsonl")
+    stamps = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                if line.strip():
+                    record = json.loads(line)
+                    stamps[int(os.path.splitext(record["frame"])[0])] = record.get("t_ms")
+    return [(i, stamps.get(i)) for i in indices]
+
+
+def session_frames(session, indices, geometry, framing, tile=None):
+    """(t_ms, crop) for a run of recorded frames, under one fixed framing.
+
+    Two framings live here, both of which hand over a crop chosen without looking:
+
+      centre  what the production path grabs today
+      tile    a fixed grid tile, the way a tiling scanner would hand it over
+
+    The `wide` path is not a framing in this sense — it decides what to crop by looking —
+    so it goes through `wide_frames` and `wide_capture.look` instead.
+    """
+
+    for index, t_ms in frame_times(session, indices):
+        wide = read_wide(session, index, geometry)
+        if wide is None:
+            continue
+        if framing == "centre":
+            yield t_ms, to_model_size(centre_slice(wide, geometry))
+        else:
+            region = geometry.region
+            x, y = tile[0] - region["left"], tile[1] - region["top"]
+            yield t_ms, to_model_size(wide[y:y + geometry.crop_side,
+                                           x:x + geometry.crop_side])
+
+
+def read_wide(session, index, geometry):
+    """The wide box out of one recorded frame, or None if the frame is unreadable."""
+
+    img = cv2.imread(os.path.join(session, f"{index:06d}.jpg"))
+    if img is None:
+        return None
+    region = geometry.region
+    return img[region["top"]:region["top"] + region["height"],
+               region["left"]:region["left"] + region["width"]]
+
+
+def replay_wide(model, session, indices, geometry, lead_ms):
+    """The shipped wide path over a run of recorded frames. Returns (action, preds).
+
+    Mirrors the armed loop the way `replay_stream` does, and goes through the same
+    `wide_capture.look` the live loop calls, so the two cannot answer different questions.
+    """
+
+    def predict(crop):
+        return model.predict(crop[:, :, ::-1])  # predict wants RGB
+
+    tracker, t0, held, preds, prior, origin = None, None, None, [], None, None
+
+    for index, t_ms in frame_times(session, indices):
+        wide = read_wide(session, index, geometry)
+        if wide is None:
+            continue
+
+        seen = look(predict, wide, geometry, held)
+        held = seen.held
+        preds.append(seen.desc)
+        if prior is None and held is not None:
+            prior = held.prior
+
+        # The crop moved, so every angle measured in the old one is in a different frame
+        # of reference. Start again rather than fit a line through two conventions.
+        if origin is not None and seen.origin != origin:
+            tracker = None
+        origin = seen.origin
+
+        if seen.pred not in TRACKED_PREDS:
+            continue
+        if tracker is None:
+            tracker, t0 = TrackerState(centre=seen.prior), t_ms
+        tracker = observe(tracker, seen.crop, t_ms - t0)
+        decision = decide(tracker, t_ms - t0, lead_ms)
+
+        if decision.press_at_ms is not None:
+            mark_fired(tracker, t_ms - t0)
+            return (f"FIRE predictive — aiming {decision.target_deg:.1f} deg, "
+                    f"press at t={decision.press_at_ms:.0f} ms ({seen.desc})"), preds, prior
+        if seen.should_hit and decision.may_react:
+            return (f"HIT reactive ({seen.desc}) — tracker stood down: "
+                    f"{decision.reason}"), preds, prior
+
+    return "NO PRESS", preds, prior
+
+
+def replay_session(args, model):
+    """Replay one framing over a run of recorded frames around each named frame."""
+
+    content, geometry = session_geometry(args.frames)
+    tile = tuple(int(v) for v in args.tile.split(",")) if args.tile else None
+    if args.framing == "tile" and tile is None:
+        sys.exit("--framing tile needs --tile X,Y (the grid origin, in content pixels)")
+
+    print(f"{args.frames}  content {content['width']}x{content['height']}  "
+          f"framing {args.framing}  lead {args.round_trip_ms:.0f} ms")
+    print(f"  {json.dumps(geometry.describe())}\n")
+
+    pressed = 0
+    for centre_frame in args.at:
+        indices = range(max(centre_frame - args.before, 0), centre_frame + args.after + 1)
+        if args.framing == "wide":
+            action, preds, prior = replay_wide(model, args.frames, indices, geometry,
+                                               args.round_trip_ms)
+        else:
+            stream = session_frames(args.frames, indices, geometry, args.framing, tile)
+            action, preds = replay_stream(model, stream, args.round_trip_ms)
+            prior = None
+        pressed += action != "NO PRESS"
+        top = ", ".join(f"{d} x{n}" for d, n in Counter(preds).most_common(3))
+        where = "" if prior is None else f"  ring prior ({prior[0]:.1f}, {prior[1]:.1f})"
+        print(f"frame {centre_frame}  {len(preds)} frames{where}")
+        print(f"   classifier: {top or 'nothing'}")
+        print(f"   -> {action}\n")
+
+    print(f"{pressed} of {len(args.at)} checks would have been pressed")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("events", nargs="?", help="recordings_video/<clip>/events.json")
+    p.add_argument("--frames", help="a session dir written by record_frames.py, replayed "
+                                    "instead of a clip; needs --at")
+    p.add_argument("--at", type=int, nargs="+", default=(),
+                   help="frame indices to replay around, one run each")
+    p.add_argument("--before", type=int, default=25, help="frames replayed before each --at")
+    p.add_argument("--after", type=int, default=25, help="frames replayed after each --at")
+    p.add_argument("--framing", choices=("centre", "tile", "wide"), default="wide",
+                   help="how the crop handed to the model is chosen; see session_frames")
+    p.add_argument("--tile", help="grid origin X,Y for --framing tile, in content pixels")
+    p.add_argument("--model", default="models/model.onnx")
+    p.add_argument("--threads", type=int, default=4)
+    p.add_argument("--round-trip-ms", type=float, default=ROUND_TRIP_MS)
+    p.add_argument("--ring-above-centre", type=float, default=RING_ABOVE_CENTRE_PX,
+                   help="px a centred check's ring sits above the live crop centre; the crop "
+                        "is shifted down by this so the clip is framed as live frames it. "
+                        "0 crops the frame's geometric centre, which is NOT what live sees")
+    p.add_argument("--fps", type=float, default=0.0,
+                   help="feed frames at about this rate; 0 uses every frame. The live loop "
+                        "runs at 33-41 fps, so a 60 fps clip fed whole gives the tracker "
+                        "more samples than it will ever have")
+    args = p.parse_args()
+
+    if not args.frames and not args.events:
+        p.error("give an events.json, or --frames SESSION --at N [N ...]")
+    if args.frames and not args.at:
+        p.error("--frames needs --at N [N ...]")
+
+    model = AI_model(model_path=args.model, use_gpu=False,
+                     nb_cpu_threads=args.threads, monitoring=None)
+    print(f"provider: {model.check_provider()}\n")
+
+    if args.frames:
+        replay_session(args, model)
+    else:
+        replay_video(args, model)
 
 
 if __name__ == "__main__":

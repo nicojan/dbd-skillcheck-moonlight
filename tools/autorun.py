@@ -39,9 +39,11 @@ from dbd.AI_model import AI_model
 from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
+from dbd.utils.wide_capture import Monitoring_wide, crop_at, look
 from check_log import ROTATE_GAP_SECONDS, CheckLog, reactive_record
 from dbd.utils.needle_tracker import (
-    AIM_BIAS_DEG, ROUND_TRIP_MS, Reading, TrackerState, aim_bias_for, decide, mark_fired,
+    AIM_BIAS_DEG, CENTRE_PRIOR, ROUND_TRIP_MS, Reading, TrackerState, aim_bias_for,
+    decide, mark_fired,
     needle_angle, observe,
     read_watch, score_freeze, strength_reference, time_to_angle,
 )
@@ -292,6 +294,9 @@ def parse_args(argv=None):
                    help="gate on focus alone, skipping the window-list confirmation")
     p.add_argument("--pin-geometry", action="store_true",
                    help="lock the startup capture region instead of re-resolving on resume")
+    p.add_argument("--no-wide", dest="wide", action="store_false",
+                   help="grab only the 224 centre crop, as before. Off-centre Doctor "
+                        "checks are then invisible again — see dbd/utils/wide_capture.py")
     return p.parse_args(argv)
 
 
@@ -587,7 +592,7 @@ def no_press_record(desc, tracker, decision, tracked_ms, context=None):
 
 
 def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
-                   lead_ms=None, record=None, context=None):
+                   lead_ms=None, record=None, context=None, grab=None):
     """Read where the press landed and how long it took to get there.
 
     A successful hit stops the needle dead at the hit position, so the frozen angle is the
@@ -611,6 +616,11 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
     Every grab is kept and handed to `record`, because the line this function prints is a
     conclusion and the readings are the evidence for it. Four sessions were spent guessing
     at a 25% loss that this loop had the data to explain and was discarding.
+
+    `grab` returns the BGR frame to read the needle in, defaulting to the centre crop. An
+    off-centre Madness check freezes where it was drawn, so watching the centre crop for
+    it would read empty floor and report nothing frozen — the caller passes the window the
+    check was actually tracked in.
     """
 
     if args.dry_run or tracker.zone is None:
@@ -623,7 +633,7 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
     readings, watch = [], read_watch(())
     while monotonic() < deadline:
         t = monotonic()
-        bgr = model.grab_screenshot()[:, :, ::-1]
+        bgr = model.grab_screenshot()[:, :, ::-1] if grab is None else grab()
         angle, strength = needle_angle(bgr, tracker.centre)
         readings.append(Reading(t, angle, strength))
         watch = read_watch(readings, reference)
@@ -742,7 +752,8 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
 
 
 def run(args):
-    monitoring = Monitoring_window(
+    capture = Monitoring_wide if args.wide else Monitoring_window
+    monitoring = capture(
         window_query=args.window,
         crop_size=224,
         stream_aspect=parse_aspect(args.aspect),
@@ -828,6 +839,25 @@ def run(args):
     dropped = 0             # consecutive check-free frames since the last tracked one
     last_capture = None
     frame_ms = DEFAULT_FRAME_MS
+    held = None             # the off-centre crop locked on for the check in progress
+    crop_origin = None      # where that crop came from, so a move can restart the track
+
+    def predict_bgr(crop):
+        """`AI_model.predict` on a BGR crop; it wants RGB, everything else here is BGR."""
+
+        return model.predict(crop[:, :, ::-1])
+
+    def grab_crop():
+        """The frame the freeze watch should read: the held window, or the centre crop.
+
+        A Madness check freezes where it was drawn, not at the centre of the screen, so a
+        landing report that re-grabs the centre crop watches empty floor and reports
+        nothing frozen.
+        """
+
+        if held is None:
+            return model.grab_screenshot()[:, :, ::-1]
+        return crop_at(monitoring.grab_wide(), held.origin, monitoring.geometry)
 
     try:
         while True:
@@ -892,9 +922,31 @@ def run(args):
 
             # --- armed loop --------------------------------------------------------
             captured = monotonic()
-            frame = model.grab_screenshot()
+            # The lock lives exactly as long as the track it was taken for. Holding it
+            # past the check would keep cropping a patch of floor and never look at the
+            # centre again.
+            if tracker is None:
+                held, crop_origin = None, None
+            if args.wide:
+                # One grab of the wide box; the centre 224 is a slice of it, so the fast
+                # path is the same pixels from the same instant it always was. `look`
+                # sweeps the rest of the box only when that centre slice is empty.
+                seen = look(predict_bgr, monitoring.grab_wide(),
+                            monitoring.geometry, held)
+                pred, desc, probs, should_hit = (seen.pred, seen.desc, seen.probs,
+                                                 seen.should_hit)
+                frame_bgr = seen.crop
+                # The crop moved — a Madness check took over from the centre, or a new one
+                # was located. Angles measured in the old window are in a different frame
+                # of reference, so start the track again rather than fit a line through
+                # two conventions. See wide_capture.look.
+                if crop_origin is not None and seen.origin != crop_origin:
+                    tracker, track_t0 = None, None
+                crop_origin, held = seen.origin, seen.held
+            else:
+                frame_bgr = model.grab_screenshot()[:, :, ::-1]
+                pred, desc, probs, should_hit = predict_bgr(frame_bgr)
             frames += 1
-            pred, desc, probs, should_hit = model.predict(frame)
 
             if last_capture is not None:
                 dt = (captured - last_capture) * 1000.0
@@ -905,13 +957,19 @@ def run(args):
             # --- predictive path: sweeping checks ----------------------------------
             if args.predict and pred in TRACKED_PREDS:
                 if tracker is None:
-                    tracker, track_t0 = TrackerState(), captured
+                    # The ring prior is the located one for an off-centre check and the
+                    # module constant otherwise, so `refine_centre` searches where the ring
+                    # actually is. Anchoring at (112, 102) regardless rejects a displaced
+                    # check silently — see wide_capture.look.
+                    tracker = TrackerState(
+                        centre=CENTRE_PRIOR if held is None else held.prior)
+                    track_t0 = captured
                 dropped = 0
                 tracked_desc = desc
 
-                # grab_screenshot returns RGB; the needle test is R - max(G,B) on a BGR
-                # array, so an unconverted frame silently measures blueness instead.
-                tracker = observe(tracker, frame[:, :, ::-1], (captured - track_t0) * 1000.0)
+                # The needle test is R - max(G,B) on a BGR array, so an RGB frame here
+                # silently measures blueness instead.
+                tracker = observe(tracker, frame_bgr, (captured - track_t0) * 1000.0)
                 base_lead_ms = lead_level_ms(lead_ms, recent_trips)
                 check_lead_ms = lead_for_check(base_lead_ms, last_trip_ms)
                 decision = decide(tracker, (monotonic() - track_t0) * 1000.0, check_lead_ms)
@@ -956,6 +1014,7 @@ def run(args):
                         # can never disagree about what a fire was.
                         record=lambda r: (landing_log.write(r) if landing_log else None,
                                           record_check(r, "predictive")),
+                        grab=grab_crop,
                         context={"fire": len(landings) + 1, "at": strftime("%H:%M:%S"),
                                  "desc": desc, "target_deg": decision.target_deg,
                                  "lead_requested_ms": round(requested_ms, 1),
