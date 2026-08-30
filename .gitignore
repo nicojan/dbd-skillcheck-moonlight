@@ -34,3 +34,8 @@ landings-*.jsonl
 # the per-check queue and its drain target: same per-run capture data as above, just
 # filed by bout instead of by session
 checks/
+
+# The venv is ignored on the author's machine via ~/.gitignore_global, which is
+# machine-local — a fresh clone anywhere else sees it as untracked. Taken from
+# upstream v4, the one line of that release worth having here.
+.venv/
