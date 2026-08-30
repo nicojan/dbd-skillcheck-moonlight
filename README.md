@@ -211,8 +211,12 @@ Until now it was arm **or** record, never both: `record_frames.py` opens a secon
 `--record` fixes that by not adding a capture client at all. The armed loop already grabs a 672 px wide box every frame, and that grab already copies out of the mss buffer, so recording is just "keep the frames we already have":
 
 ```bash
-.venv/bin/python tools/autorun.py --record
+dbd                                          # records by default
+.venv/bin/python tools/autorun.py --record   # the bare tool is opt-in
+dbd --no-record                              # turn it off for one run
 ```
+
+**The `dbd` shell function passes `--record` for you**, because a match you forgot to record is gone and the flag costs nothing to leave on. The bare tool stays opt-in so nothing about the calibrated path changes unless you ask.
 
 Measured cost of the hot-loop half: **0.21 us per frame**, 0.001% of a ~31 ms loop. It is a `deque.append`; nothing is encoded until a frame is actually kept.
 

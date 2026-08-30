@@ -304,6 +304,10 @@ def parse_args(argv=None):
                    help="keep the wide frames around each check, in gap-separated bouts "
                         "under frames/. Costs one deque append per frame; review and "
                         "prune with tools/review_recordings.py")
+    # The `dbd` shell function passes --record before "$@", so this is what lets
+    # `dbd --no-record` turn it back off. Same dest, later flag wins.
+    p.add_argument("--no-record", dest="record", action="store_false",
+                   help="do not record, overriding an earlier --record")
     p.add_argument("--record-pre", type=float, default=DEFAULT_PRE_SECONDS,
                    help="seconds of lead-in kept before each check (ring buffer)")
     p.add_argument("--record-post", type=float, default=DEFAULT_POST_SECONDS,
