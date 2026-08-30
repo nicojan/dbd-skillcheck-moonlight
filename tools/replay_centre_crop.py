@@ -137,6 +137,62 @@ def replay_check(model, cap, check, fps, side, step, lead_ms, offset_y):
     return replay_stream(model, video_frames(cap, check, fps, side, step, offset_y), lead_ms)
 
 
+def video_wide(model, cap, check, fps, step, geometry, lead_ms, offset_y):
+    """The same, through the wide path — the box sliced out of the clip's own frames.
+
+    The only Madness footage in the repo is also Merciless Storm footage, so this is the
+    one place Doctor-plus-Storm can be asked about at all. The clip draws a centred check
+    at the frame's geometric centre while live puts the ring 10 px above the crop centre,
+    so the box is slid down by `offset_y` — the same correction `centre_crop` applies to
+    its crop, applied to the box instead, which keeps the centre slice equal to it.
+    """
+
+    def predict(crop):
+        return model.predict(crop[:, :, ::-1])  # predict wants RGB
+
+    region = geometry.region
+    cap.set(cv2.CAP_PROP_POS_FRAMES, check["frame0"])
+    tracker, t0, held, origin, preds = None, None, None, None, []
+
+    for i in range(check["frame0"], check["frame1"] + 1):
+        ok, bgr = cap.read()
+        if not ok:
+            break
+        if (i - check["frame0"]) % step:
+            continue
+
+        top = region["top"] + offset_y
+        wide = bgr[top:top + region["height"],
+                   region["left"]:region["left"] + region["width"]]
+        if wide.shape[:2] != (region["height"], region["width"]):
+            break                                   # the box ran off this clip's frame
+
+        t_ms = (i - check["frame0"]) / fps * 1000.0
+        seen = look(predict, wide, geometry, held)
+        held = seen.held
+        preds.append(seen.desc)
+        if origin is not None and seen.origin != origin:
+            tracker = None
+        origin = seen.origin
+
+        if seen.pred not in TRACKED_PREDS:
+            continue
+        if tracker is None:
+            tracker, t0 = TrackerState(centre=seen.prior), t_ms
+        tracker = observe(tracker, seen.crop, t_ms - t0)
+        decision = decide(tracker, t_ms - t0, lead_ms)
+
+        if decision.press_at_ms is not None:
+            mark_fired(tracker, t_ms - t0)
+            return (f"FIRE predictive — aiming {decision.target_deg:.1f} deg, "
+                    f"press at t={decision.press_at_ms:.0f} ms ({seen.desc})"), preds
+        if seen.should_hit and decision.may_react:
+            return (f"HIT reactive ({seen.desc}) — tracker stood down: "
+                    f"{decision.reason}"), preds
+
+    return "NO PRESS", preds
+
+
 def replay_video(args, model):
     """Every check in an ingested clip, cropped the way the live grab crops."""
 
@@ -156,10 +212,19 @@ def replay_video(args, model):
           f"{CROP}  crop shifted {offset_y:+d} px  feeding {fps / step:.0f} fps  "
           f"lead {args.round_trip_ms:.0f} ms\n")
 
+    geometry = None
+    if args.framing == "wide":
+        geometry = wide_geometry({"left": 0, "top": 0, "width": width, "height": height})
+        print(f"  wide box {geometry.region}, slid {offset_y:+d} px\n")
+
     pressed = 0
     for check in events["checks"]:
-        action, preds = replay_check(model, cap, check, fps, side, step,
-                                     args.round_trip_ms, offset_y)
+        if geometry is not None:
+            action, preds = video_wide(model, cap, check, fps, step, geometry,
+                                       args.round_trip_ms, offset_y)
+        else:
+            action, preds = replay_check(model, cap, check, fps, side, step,
+                                         args.round_trip_ms, offset_y)
         pressed += action != "NO PRESS"
         top = ", ".join(f"{d} x{n}" for d, n in Counter(preds).most_common(3))
         print(f"{check['dir']}  off {check['off_px']:5.1f} px  "
@@ -338,8 +403,11 @@ def main():
                    help="frame indices to replay around, one run each")
     p.add_argument("--before", type=int, default=25, help="frames replayed before each --at")
     p.add_argument("--after", type=int, default=25, help="frames replayed after each --at")
-    p.add_argument("--framing", choices=("centre", "tile", "wide"), default="wide",
-                   help="how the crop handed to the model is chosen; see session_frames")
+    p.add_argument("--framing", choices=("centre", "tile", "wide"), default=None,
+                   help="how the crop handed to the model is chosen; see session_frames. "
+                        "Defaults to `centre` for a clip, which is the path this tool was "
+                        "written to test, and to `wide` for a frame session, which is the "
+                        "path that needs one. Pass it explicitly to compare the two")
     p.add_argument("--tile", help="grid origin X,Y for --framing tile, in content pixels")
     p.add_argument("--model", default="models/model.onnx")
     p.add_argument("--threads", type=int, default=4)
@@ -358,6 +426,8 @@ def main():
         p.error("give an events.json, or --frames SESSION --at N [N ...]")
     if args.frames and not args.at:
         p.error("--frames needs --at N [N ...]")
+    if args.framing is None:
+        args.framing = "wide" if args.frames else "centre"
 
     model = AI_model(model_path=args.model, use_gpu=False,
                      nb_cpu_threads=args.threads, monitoring=None)

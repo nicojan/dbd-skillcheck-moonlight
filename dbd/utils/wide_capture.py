@@ -40,7 +40,9 @@ does not inherit that n=1.
 
 The risk is asymmetric in our favour: the centre path never consults this module, so a
 ring the sweep misses is a check that would have been missed anyway. The floor is the
-status quo.
+status quo — but only because `look` also DROPS a lock the moment its own window goes
+empty and the centre does not. Without that the floor does not hold, and Merciless Storm
+plus Doctor is what proved it; see the rule in `look`.
 
 Why the crop is re-centred rather than handed over as a tile
 ------------------------------------------------------------
@@ -50,6 +52,18 @@ Measured over the nine, the ring sits **8 to 88 px** from (112, 102) inside its 
 then measured about a point in the background, and the check is rejected **silently** —
 the failure mode NOTES-local.md warns about at *tile centre vs check centre*. Re-centring
 on the located ring removes the problem by construction instead of tuning around it.
+
+Merciless Storm plus Doctor is the one state where this can make things worse rather than
+just better, because Storm draws no solid Great band, so `decide` stands down and
+`autorun.py` presses on the classifier's cue instead — and a reactive press lands ~25 deg
+late against a ~23 deg zone. Wide capture makes off-centre Storm revolutions visible, so
+it enlarges the population of those presses. Measured on `merciless-storm-madness2`, the
+only Doctor-plus-Storm footage here, with `--framing wide`: the wide path's verdict on
+every one of the 9 CENTRED revolutions is identical to the centre crop's, and of the 4
+off-centre ones it adds a single press — a predictive fire on a real repair check with a
+measured band, not a Storm outline. So the enlargement is real in principle and measured
+at zero here, on n = 4. The open question it presses on is `NOTES-local.md`'s, not this
+module's: whether to suppress the reactive fallback when no zone is drawn.
 
 Measured both ways over the nine, with `tools/replay_centre_crop.py --frames`: the
 production centre crop presses **1 of 9**, and that one is a single-frame reactive false
@@ -325,7 +339,25 @@ def look(predict, wide, geometry, held=None):
     if held is not None:
         crop = crop_at(wide, held.origin, geometry)
         pred, desc, probs, should_hit = predict(crop)
-        return Look(pred, desc, probs, should_hit, crop, held.origin, held, 1)
+        if pred != NONE_CLASS:
+            return Look(pred, desc, probs, should_hit, crop, held.origin, held, 1)
+
+        # The held window went empty. Before spending another frame on it, make sure the
+        # centre is not showing a check — a LOCK MUST NEVER HIDE THE CENTRE PATH, which is
+        # the guarantee the whole design rests on. Without this the lock is unconditional
+        # for the life of the track, and a false ring that classifies once suppresses the
+        # working path entirely: measured on `merciless-storm-madness2`, check_004 is a
+        # dead-centre check that the sweep stole on its first frame with a ring at the
+        # box's left edge, then sat on for all 32 remaining frames.
+        centre = to_model_size(centre_slice(wide, geometry))
+        c_pred, c_desc, c_probs, c_hit = predict(centre)
+        if c_pred != NONE_CLASS:
+            return Look(c_pred, c_desc, c_probs, c_hit, centre, geometry.centre, None, 2)
+
+        # Both empty. Keep the lock: a one or two frame gap mid-check is normal, and
+        # re-sweeping would move the crop and restart the track for nothing. The caller's
+        # drop rule ends the track if the gap turns out to be the end of the check.
+        return Look(pred, desc, probs, should_hit, crop, held.origin, held, 2)
 
     centre = to_model_size(centre_slice(wide, geometry))
     pred, desc, probs, should_hit = predict(centre)

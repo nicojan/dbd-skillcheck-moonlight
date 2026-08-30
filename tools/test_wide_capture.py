@@ -23,7 +23,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))                   # tools/
 
 from dbd.utils.needle_tracker import CENTRE_PRIOR
-from dbd.utils.wide_capture import NONE_CLASS, centre_slice, look, wide_geometry
+from dbd.utils.wide_capture import (
+    NONE_CLASS,
+    OffCentreCrop,
+    centre_slice,
+    look,
+    wide_geometry,
+)
 
 FAILURES = []
 
@@ -165,6 +171,40 @@ def test_a_confirmed_off_centre_check_locks_and_is_held():
     again = look(held_predict, wide, geometry, seen.held)
     check("a held crop costs one inference", again.inferences == 1, again.inferences)
     check("and does not move", again.origin == seen.origin, (again.origin, seen.origin))
+
+
+def test_a_lock_never_hides_the_centre_path():
+    """The lock is the one way this design can make things WORSE, so it must be revocable.
+
+    `full black (out)` is a weak, permissive class, so a false ring that classifies once is
+    enough to lock. Held unconditionally for the life of the track, that suppresses the
+    working centre path entirely — measured on `merciless-storm-madness2`, where a
+    dead-centre check was stolen on its first frame by a ring at the box's left edge and
+    then sat on for all 32 remaining frames. The lock must be dropped the moment its own
+    window goes empty and the centre does not.
+    """
+
+    geometry = wide_geometry(content())
+    stolen = OffCentreCrop(origin=(0, 243), prior=CENTRE_PRIOR, ring_r=65.0)
+
+    # The held window is empty; the centre crop has a check in it.
+    wide = np.zeros((geometry.side, geometry.side, 3), dtype=np.uint8)
+    x, y = geometry.centre
+    wide[y + 10:y + 20, x + 10:x + 20] = 150
+    predict = Recorder({150: (1, "repair-heal (out)", False)})
+
+    seen = look(predict, wide, geometry, stolen)
+    check("the lock is dropped", seen.held is None)
+    check("and the centre check is seen", seen.pred == 1, seen.desc)
+    check("at the cost of one extra inference", seen.inferences == 2, seen.inferences)
+    check("the caller will restart the track", seen.origin == geometry.centre, seen.origin)
+
+    # Both empty: a one or two frame gap mid-check is normal, so the lock is kept rather
+    # than re-swept, which would move the crop and restart the track for nothing.
+    quiet = np.zeros((geometry.side, geometry.side, 3), dtype=np.uint8)
+    gap = look(Recorder({}), quiet, geometry, stolen)
+    check("a gap with nothing anywhere keeps the lock", gap.held is stolen)
+    check("and does not move the crop", gap.origin == stolen.origin, gap.origin)
 
 
 def test_the_centre_crop_wins_when_it_sees_anything():
