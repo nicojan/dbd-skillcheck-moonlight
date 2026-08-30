@@ -58,7 +58,20 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 ## Resume here
 
-Read this section first; it is the state as of 2026-08-29.
+Read this section first; it is the state as of 2026-08-30.
+
+**2026-08-30 (00:40): the first armed match with `--record` was played, it worked, and Ctrl-C then ate half the evidence.** Both halves of that sentence matter, and the second one is the finding.
+
+**What the surviving log says.** Eight armed stretches over 75 minutes, **28-37 fps** against the ~32 predicted for wide capture, so the 672 box costs nothing visible at real fps. **105 predictive fires, 98 graded: 68 GREAT (69%), 28 good, 2 MISS**, plus 32 reactive hits. **Both misses are EARLY** (-42.5 deg on a 4.8 RMS fit, and -7.0), so a second full session at 4.5 deg bias has produced **zero late misses** — the failure mode that change was expected to create still has not appeared in 200+ graded fires. Four bouts recorded, **141 checks, 993 MB in 70 minutes** — an eighth of the 7.4 GB/hour a continuous recorder would have cost, which is the ring buffer doing exactly what it was built for.
+
+**What it cannot say, and this was the whole point of playing.** The **drop count is still unmeasured**. The shutdown block never ran to a terminal or a file, so `recorder.summary()` — the one number no replay or pty test can reach — is gone with it. Also open: only `repair-heal` and `full white` were classified all night, so **no Doctor, no Madness, and the wide path's live behaviour on an off-centre check remains untested**. It ran 105 predictive fires without a regression, which is worth something, but it is not the test. Note too that the ring sweep is **silent when it fires** — nothing in the log distinguishes a re-centred crop from a centred one, so even a Doctor match would not report how often the sweep did the work. Worth a counter at shutdown.
+
+**One Ctrl-C, two failures, and neither is visible from inside Python.** The run ended with four bouts on disk, no review prompt, and a log that stops mid-focus-change at 00:37:01. (1) An untrapped SIGINT **aborts the whole zsh function**, so the `review_recordings.py` call after the armed run never ran. (2) `tee` sits in the **same foreground process group** and takes the same signal, and it dies *first* — so autorun's entire `finally` block, landing tally and drop count included, wrote into a broken pipe and was lost from the terminal *and* the log. The fix is two traps in `dbd`: `trap ':' INT` around the armed run keeps the function alive to reach the TUI, and `trap '' INT` inside `tee`'s subshell keeps the writer alive until Python closes the pipe on its own.
+
+**The shell function was the last load-bearing piece with no test, which is why this shipped.** `tools/test_dbd_shell.py` now **extracts the armed-run tail out of `~/.zshrc` verbatim** and runs *that* in a pty with stubs for autorun and the review tool, so it cannot drift from what runs at 23:00. A pty and not a pipe, deliberately: the bug is about process-group signal delivery, and a signal sent to the process alone never reaches `tee` and never reproduces. Negative control run against a mutated copy with the traps stripped: **5 of 7 checks fail**, the right five. Also fixed there: the log was `armed-$(date +%H%M).log` with **no date** — `armed-2338.log` already existed twice, from 08-19 and 08-30 — and is now `%Y%m%d-%H%M`.
+
+**The four bouts were reviewed after the fact and all discarded**, so `frames/discard/` now holds about a gigabyte awaiting a deliberate `--empty-discard`.
+
 
 **2026-08-29 (23:15): upstream v4 was evaluated and DECLINED, and the model question is settled empirically.** `git merge upstream/main` conflicts on five paths and is not worth resolving. Upstream's four new commits are three `FUNDING.yml` edits and one restructure (`32ca305`, "v4 GH"). Taken piecemeal:
 

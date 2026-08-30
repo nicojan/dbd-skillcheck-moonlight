@@ -238,6 +238,8 @@ Then pick what to keep. **Everything starts unchecked** — keeping is the delib
 
 **`dbd` opens the TUI itself when the armed run ends**, so you review while the match is still in your head — which bout was the Doctor is not a question a timestamp answers a week later. `DBD_NO_REVIEW=1` skips it. It runs from the shell function rather than from inside `autorun`, deliberately: the armed process holds the hot loop and a curses screen has no business in it.
 
+**Ctrl-C is the supported way to end a run, and it takes two traps in `dbd` to survive.** An untrapped SIGINT aborts the whole zsh function, so the TUI above never opens; and `tee` sits in the same foreground process group, takes the same signal, and dies before `autorun`'s shutdown block — landing tally and recorder drop count — can write, so it is lost from the terminal *and* the log. Both happened live on 2026-08-29. `trap ':' INT` around the armed run and `trap '' INT` inside `tee`'s subshell fix it, and `tools/test_dbd_shell.py` pins it by extracting that block out of `~/.zshrc` and Ctrl-C'ing it in a real pty.
+
 SPACE keeps, `a` toggles all, `p` opens the middle frame so you can see what a bout was, ENTER applies. `q` quits changing nothing; **ESC is deliberately not a quit key** — it used to be, which meant backing out discarded the selection rather than applying it, and an escape sequence begins with ESC. Applying moves every unchecked bout to `frames/discard/` and marks the kept ones reviewed so they do not come back. Discard is a **move, not a delete** — these frames are unrepeatable. `--empty-discard` is the only thing here that destroys anything.
 
 **A bout declares its own geometry, and this is load-bearing.** Its frames are 672 px boxes, not content rects, and the two readers in this repo both used to infer geometry from the image: `replay_centre_crop.session_geometry` took the first frame's shape *as* the content rect, and `scan_frames` sized its tile as `224 x height / 1080`. Hand either one a bout and it computes a plausible wrong answer in silence — a 672-tall "content rect" yields a 139 px tile and a wide box that is nowhere near any check. So every bout carries `bout.json` with `kind: "wide_bout"` plus the content rect and `WideGeometry` it was actually cropped with, and both readers branch on that marker instead of guessing. A directory without `bout.json` is a `record_frames.py` session and reads exactly as it always did.
@@ -276,6 +278,7 @@ Twenty-seven small programs, all but the runner offline and replayable against r
 | `review_recordings.py` | the TUI that tallies recorded bouts and keeps only the ones you check off |
 | `test_clip_recorder.py` | tests the ring buffer, the bout gap rule, the no-double-write rule and drop-on-saturation |
 | `test_review_recordings.py` | tests what moves bouts, and drives the TUI in a real pty for the key handling |
+| `test_dbd_shell.py` | extracts the armed-run tail of the `dbd` shell function out of `~/.zshrc` and Ctrl-Cs it in a real pty: the review TUI must still open and the shutdown summary must still reach the log |
 | `analyse_needle.py` | needle angle per frame, and how constant the sweep rate is |
 | `measure_zone.py` | Great and Good widths straight from the drawn pixels |
 | `sweep_rates.py` | per-check rate and fit quality across a whole session |
