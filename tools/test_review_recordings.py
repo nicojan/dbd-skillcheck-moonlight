@@ -1,9 +1,14 @@
-"""The part of the review tool that moves data. The curses rendering is not tested here.
+"""The part of the review tool that moves data, plus the keys that drive it.
 
 Everything that can lose a bout lives in `scan` / `apply_selection` / `empty_discard`, so
 those run headless against temp directories. The defaults matter as much as the moves: a
 bout that arrives pre-checked would be kept by a careless ENTER, which is the one outcome
 this tool exists to prevent.
+
+The last three tests run the tool in a real pty, because the headless ones cannot see the
+class of bug that actually bit: they hand `loop` integer key codes, while a terminal sends
+escape SEQUENCES. ESC used to mean quit, so backing out discarded the selection instead of
+applying it. A stub screen passes that every time.
 """
 
 import json
@@ -155,6 +160,103 @@ def test_empty_discard_deletes_only_the_pile():
         check("the pile is empty",
               os.listdir(os.path.join(root, "discard")) == [],
               str(os.listdir(os.path.join(root, "discard"))))
+    finally:
+        shutil.rmtree(root)
+
+
+# --- the real terminal --------------------------------------------------------------
+#
+# The tests above drive `loop` with integer key codes, which is exactly why they could not
+# see the bug that mattered: they bypass terminal byte parsing entirely. Under ncurses a
+# key arrives as an escape SEQUENCE, and `27` on its own used to mean quit — so ESC threw
+# the whole selection away without applying it. These run the tool in a real pty instead.
+#
+# Note the arrow bytes: once ncurses enables keypad it puts the terminal in APPLICATION
+# cursor mode, where Down is \x1bOB, not the normal-mode \x1b[B. Sending the wrong one
+# tests nothing and looks like a navigation bug.
+
+KEY_DOWN_APP = b"\x1bOB"
+
+
+def drive_tui(root, keys, settle=1.2, per_key=0.5):
+    """Run the tool in a pty, send `keys`, return the directories still in `root`."""
+
+    import fcntl
+    import pty
+    import select
+    import struct
+    import termios
+    import time
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.environ["TERM"] = "xterm-256color"
+        os.execv(os.path.join(repo, ".venv/bin/python"),
+                 ["python", os.path.join(repo, "tools/review_recordings.py"),
+                  "--root", root])
+    # curses cannot lay out a screen of unknown size, and a 0x0 pty makes it fail on start.
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+
+    def drain(seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            if select.select([fd], [], [], 0.2)[0]:
+                try:
+                    if not os.read(fd, 65536):
+                        return False
+                except OSError:
+                    return False
+        return True
+
+    drain(settle)
+    for key in keys:
+        try:
+            os.write(fd, key)
+        except OSError:
+            break
+        if not drain(per_key):
+            break
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+    return sorted(n for n in os.listdir(root)
+                  if os.path.isdir(os.path.join(root, n)) and n.startswith("bout_"))
+
+
+def test_pty_arrow_then_space_keeps_the_second_bout():
+    root = tempfile.mkdtemp()
+    try:
+        for i in range(3):
+            make_bout(root, f"bout_{i:02d}", checks=i + 1)
+        left = drive_tui(root, [KEY_DOWN_APP, b" ", b"\r", b"y"])
+        check("arrow moves, space keeps, enter+y applies", left == ["bout_01"], str(left))
+    finally:
+        shutil.rmtree(root)
+
+
+def test_pty_esc_does_not_discard_the_session():
+    """ESC used to mean quit, which threw the selection away. It must be inert now."""
+
+    root = tempfile.mkdtemp()
+    try:
+        for i in range(3):
+            make_bout(root, f"bout_{i:02d}", checks=i + 1)
+        left = drive_tui(root, [b"\x1b", b" ", b"\r", b"y"])
+        check("ESC is inert and the selection survives it", left == ["bout_00"], str(left))
+    finally:
+        shutil.rmtree(root)
+
+
+def test_pty_q_quits_and_changes_nothing():
+    root = tempfile.mkdtemp()
+    try:
+        for i in range(3):
+            make_bout(root, f"bout_{i:02d}", checks=i + 1)
+        left = drive_tui(root, [b" ", b"q"])
+        check("q quits with nothing moved",
+              left == ["bout_00", "bout_01", "bout_02"], str(left))
     finally:
         shutil.rmtree(root)
 

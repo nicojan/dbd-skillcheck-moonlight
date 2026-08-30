@@ -195,6 +195,21 @@ def loop(screen, bouts):
     """Returns True if the user chose to apply, False if they quit."""
 
     curses.curs_set(0)
+    # Both of these are load-bearing, and the second was a live bug.
+    #
+    # keypad: without it an arrow key arrives as its raw bytes (ESC, '[', 'B') instead of
+    # one KEY_DOWN. `curses.wrapper` already sets it, but `loop` is called directly by the
+    # tests too, and a navigation key that silently does nothing is not worth the risk.
+    #
+    # ESC is NOT a quit key. It used to be, and that made the FIRST arrow press quit and
+    # throw the session away — the ESC that opens the escape sequence was read as a bare
+    # ESC. Verified in a pty: one KEY_DOWN produced "quit — nothing changed". `q` quits;
+    # nothing else does.
+    screen.keypad(True)
+    try:
+        curses.set_escdelay(25)     # shrink the window where a lone ESC can be mistaken
+    except (AttributeError, curses.error):
+        pass                        # older curses; ESC is unbound anyway
     cursor, offset, message = 0, 0, None
     while True:
         height = screen.getmaxyx()[0]
@@ -204,7 +219,7 @@ def loop(screen, bouts):
         message = None
 
         key = screen.getch()
-        if key in (ord("q"), 27):
+        if key == ord("q"):
             return False
         if key in (curses.KEY_DOWN, ord("j")):
             cursor = min(cursor + 1, len(bouts) - 1)
