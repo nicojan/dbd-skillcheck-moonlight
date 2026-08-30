@@ -26,6 +26,8 @@ The lead starts at 60 ms and follows the link from there. Two rules sit on top o
 
 **Off-centre Doctor checks are handled as of 2026-08-29, and have not yet been played.** The Doctor's Madness displaces a check from dead centre, so the fixed 224 crop never captured it: a silent miss no lead or aim value could reach. One recorded Doctor match holds **nine of them, six being SNAP OUT OF IT** — an action that exists only against a Doctor and that this bot had never seen. `dbd/utils/wide_capture.py` grabs a 672-pixel box instead, classifies its centre 224 slice (byte-for-byte the frame the old path grabbed), and only when that slice is empty sweeps the box for the check's ring and re-crops about it. Replayed over those nine it presses **9 of 9** against the old path's 1, and its decisions on the same match's 58 centred checks are byte-identical. `--no-wide` reverts it.
 
+**An armed match records itself as of 2026-08-29, also unplayed.** Until then it was arm *or* record — not because recording was expensive, but because a second `mss` client starves the first on macOS. The armed loop already grabs the 672 box, so `dbd/utils/clip_recorder.py` keeps those frames instead of opening a second client: **0.21 us per frame**, 0.001% of the loop. A ring buffer writes nothing until a check fires, so only the checks and their lead-in reach disk. `tools/review_recordings.py` then tallies the recorded bouts with **everything unchecked**, and `dbd` opens it when the run ends. Rare perks and killer powers were previously unrecoverable after the fact; now they are not.
+
 Not handled: Merciless Storm, where the tracker deliberately abstains and the loop then presses reactively anyway — and wide capture makes off-centre Storm revolutions visible, which enlarges that population on a Doctor gen. `full white` checks are fired at but **not graded** — that type draws its whole success zone as one solid block, so there is no Great band to measure and any landing inside would score Great by construction.
 
 We measured the Great zone off the drawn pixels of 13 deliberately missed checks. It is **10.5 degrees wide**, and the same measurement on the 13 hit checks agrees to within half a degree. At our median sweep rate of 320 deg/s the needle crosses that band in 33 ms, and across every rate we have recorded, up to the 406 deg/s ceiling Hyperfocus can reach, the window runs 26 to 37 ms. Our keypress-to-pixel round trip is **about 56 ms**, median over 56 armed fires, ranging 39 to 120.
@@ -105,7 +107,10 @@ Start Moonlight and make it fullscreen. Then:
 .venv/bin/python tools/autorun.py --pin-geometry   # freeze the box after the first lock
 .venv/bin/python tools/autorun.py --no-predict     # upstream's reactive behaviour
 .venv/bin/python tools/autorun.py --no-wide        # the 224 crop only; Doctor checks go blind again
+.venv/bin/python tools/autorun.py --record         # keep the frames around each check
 ```
+
+In practice you type `dbd`, the shell function in `~/.zshrc` that starts the stream, launches the game, arms the bot **with `--record`**, and opens the review TUI when you stop it. It passes everything through, so `dbd --dry-run` and `dbd --no-record` work as you would expect; `DBD_NO_REVIEW=1` skips the review step.
 
 Every predictive shot logs the fitted rate, the fit residual, the frame count behind it, and the angle it aimed at. It then reads where the needle froze and grades itself Great, good or miss on the spot, so accuracy is a measurement rather than an inference from the end-of-match tally. A check that is tracked and then given up on — too few samples, a fit that never tightened — prints a `NO PRESS` line saying so, so the log carries the checks it lost as well as the ones it hit. Each fire is also written to `landings-<timestamp>.jsonl` with its raw readings; read a match back with:
 
@@ -237,7 +242,9 @@ SPACE keeps, `a` toggles all, `p` opens the middle frame so you can see what a b
 
 **A bout declares its own geometry, and this is load-bearing.** Its frames are 672 px boxes, not content rects, and the two readers in this repo both used to infer geometry from the image: `replay_centre_crop.session_geometry` took the first frame's shape *as* the content rect, and `scan_frames` sized its tile as `224 x height / 1080`. Hand either one a bout and it computes a plausible wrong answer in silence — a 672-tall "content rect" yields a 139 px tile and a wide box that is nowhere near any check. So every bout carries `bout.json` with `kind: "wide_bout"` plus the content rect and `WideGeometry` it was actually cropped with, and both readers branch on that marker instead of guessing. A directory without `bout.json` is a `record_frames.py` session and reads exactly as it always did.
 
-Verified end to end: a bout built from the known off-centre check at frame 3750 replays to the **same decision as its full-frame source** — FIRE predictive, aiming 169.5 deg, same five-frame classifier run — and `scan_frames` reads it at a 224 px tile with the check at 1.000.
+Verified end to end: a bout built from the known off-centre check at frame 3750 replays to the **same decision as its full-frame source** — FIRE predictive, aiming 169.5 deg, same five-frame classifier run — and `scan_frames` reads it at a 224 px tile with the check at 1.000. The TUI's key handling is pinned by three tests that drive it in a real pty, because the headless ones hand `loop` integer key codes and cannot see what a terminal actually sends — which is how ESC-quits-and-discards survived them.
+
+**Unplayed.** Every result above is a replay. The one thing no replay can test is whether the writer threads keep up at real frame rate against a real disk, so on the first armed run read the **drop count in the recorder's shutdown line** — a non-zero drop means frames were thrown away rather than written.
 
 Upstream's Gradio web UI still runs through `python app.py`, with a `moonlight` capture backend added.
 
@@ -245,7 +252,7 @@ Read this twice: EAC can treat injected input as an unfair advantage, and accoun
 
 ## Tools
 
-Twenty-five small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
+Twenty-seven small programs, all but the runner offline and replayable against recorded frames. None of them need the game running.
 
 | Tool | What it does |
 |---|---|
@@ -267,6 +274,8 @@ Twenty-five small programs, all but the runner offline and replayable against re
 | `record_checks.py` | clean 224-pixel frame sequences of individual checks |
 | `record_frames.py` | full frames at 30 fps with no inference, for offline work. Cannot run while the bot is armed — use `autorun.py --record` |
 | `review_recordings.py` | the TUI that tallies recorded bouts and keeps only the ones you check off |
+| `test_clip_recorder.py` | tests the ring buffer, the bout gap rule, the no-double-write rule and drop-on-saturation |
+| `test_review_recordings.py` | tests what moves bouts, and drives the TUI in a real pty for the key handling |
 | `analyse_needle.py` | needle angle per frame, and how constant the sweep rate is |
 | `measure_zone.py` | Great and Good widths straight from the drawn pixels |
 | `sweep_rates.py` | per-check rate and fit quality across a whole session |
