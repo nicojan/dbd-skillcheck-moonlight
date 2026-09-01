@@ -85,7 +85,7 @@ def load_sessions(paths):
     return out
 
 
-def regrade(sessions, lead_of, bias_deg=AIM_BIAS_DEG):
+def regrade(sessions, lead_of, bias_deg=AIM_BIAS_DEG, base_of=None):
     """Grade every fire under `lead_of(last_trip_ms, trips)` and an aim bias, via score_freeze.
 
     Translation only, and measured from what the fire recorded. Leading by `d` ms MORE means
@@ -95,14 +95,21 @@ def regrade(sessions, lead_of, bias_deg=AIM_BIAS_DEG):
     """
 
     verdicts, errors = [], []
-    for _, fires in sessions:
+    for name, fires in sessions:
+        # `base_of` is what a cold-start policy varies: the value the level tracker falls
+        # back to before it has LEVEL_MIN_SAMPLES trips to form a median from. Passed per
+        # session because a seed comes from the session BEFORE it, and pooling would hand
+        # every session a number drawn partly from its own future.
+        base = None if base_of is None else base_of(name)
         last_trip, trips = None, ()
         for record, zone in fires:
             rate = record["rate_deg_s"]
             sign = 1.0 if rate > 0 else -1.0
             per_ms = abs(rate) / 1000.0
 
-            lead_delta = record["lead_ms"] - lead_of(last_trip, trips)
+            aimed = (lead_of(last_trip, trips) if base is None
+                     else lead_of(last_trip, trips, base))
+            lead_delta = record["lead_ms"] - aimed
             # From the aim this fire was ACTUALLY taken with, never the live constant. Read
             # from the constant, every recorded landing silently re-baselines the moment
             # someone edits it, and the tool reports the new value as already shipped — it
@@ -139,6 +146,75 @@ def shipped(last_trip_ms, trips):
         autorun.lead_level_ms(autorun.ROUND_TRIP_MS, trips), last_trip_ms)
 
 
+def seeded(last_trip_ms, trips, base_ms):
+    """The shipped policy with the 60 ms constant replaced by a per-session seed.
+
+    Nothing else moves: the level tracker and the burst rule are untouched, so this only
+    changes WHERE the lead starts, not how it adapts. That is the whole point — the level
+    tracker already fixes the lead within LEVEL_MIN_SAMPLES trips, and the fires it cannot
+    reach are the ones before it has them.
+    """
+
+    return autorun.lead_for_check(autorun.lead_level_ms(base_ms, trips), last_trip_ms)
+
+
+def seeded_cold_only(last_trip_ms, trips, base_ms):
+    """Seed the COLD START alone, then hand the base back to the shipped constant.
+
+    `lead_level_ms` uses `base_lead_ms` twice: as the value to fall back to before it has
+    `LEVEL_MIN_SAMPLES` trips, and as the value its deadband measures the median against
+    for the whole rest of the session. `seeded` moves both, which is why it buys a smaller
+    cold-start miss count and pays for it in Greats hours later — a base near the link's
+    level puts every later median inside the deadband, pinning the lead to the seed.
+
+    Only the first use is the cold start. This swaps the base back the moment the tracker
+    can stand on its own, so the seed reaches the fires it was meant for and nothing else.
+    """
+
+    base = autorun.cold_start_base(autorun.ROUND_TRIP_MS, trips, base_ms)
+    return autorun.lead_for_check(autorun.lead_level_ms(base, trips), last_trip_ms)
+
+
+def session_medians(sessions):
+    """Median round trip per session, in the chronological order the filenames give."""
+
+    out = {}
+    for name, fires in sessions:
+        trips = sorted(r["round_trip_ms"] for r, _ in fires)
+        out[name] = trips[len(trips) // 2] if trips else None
+    return out
+
+
+def previous_seed(sessions, fallback):
+    """Seed each session from the one before it — the policy as it would actually run.
+
+    An oracle that seeds a session from its OWN median measures nothing you could ship:
+    at the first fire that number does not exist yet. The honest test is the value the
+    previous run would have written to disk, which is what this builds. The earliest
+    session has no predecessor and keeps the constant, exactly as a first-ever run would.
+    """
+
+    medians = session_medians(sessions)
+    order = [name for name, _ in sessions]
+    seeds, prev = {}, None
+    for name in order:
+        seeds[name] = fallback if prev is None else prev
+        if medians[name] is not None:
+            prev = medians[name]
+    return seeds
+
+
+def first_fires(sessions, n):
+    """Each session truncated to its first `n` fires — where a cold start can still bite.
+
+    A cold-start fix touches two or three fires in a session of forty, so an overall row
+    buries it: the same two converted misses read as a rounding change. This is the view
+    that can actually see the thing being changed.
+    """
+
+    return [(name, fires[:n]) for name, fires in sessions if fires[:n]]
+
+
 def line(label, verdicts, errors):
     """One row. Misses are split by WHICH EDGE they left through, because the two are
     different failure modes with different causes: an early miss is a link drop the lead
@@ -155,7 +231,25 @@ def line(label, verdicts, errors):
                mean(errors), stdev(errors)))
 
 
+USAGE = """re-score aim and lead policies against recorded landings
+
+    .venv/bin/python tools/rescore_policy.py [landings-*.jsonl ...]
+
+With no arguments it reads every landings-*.jsonl in the working directory. Pass a subset
+to score one link regime on its own — the constant went stale because the link drifted, so
+a whole-record number can hide a policy that only works on the sessions you no longer play.
+"""
+
+
 def main(argv):
+    # A real -h, for the reason the sibling tool's absence of one is a documented trap:
+    # `pull_check_stats.py` reads `"--peek" in argv[1:]` and treats everything else, --help
+    # included, as a full drain — which is how the check log got drained by a --help call on
+    # 2026-08-30. This tool is read-only, so the same slip only produced a confusing
+    # FileNotFoundError for '--help', but the fix is one line and the surprise is the same.
+    if any(a in ("-h", "--help") for a in argv[1:]):
+        print(USAGE)
+        return 0
     paths = argv[1:] or glob.glob("landings-*.jsonl")
     sessions = load_sessions(paths)
     if not sessions:
@@ -180,6 +274,34 @@ def main(argv):
     for bias in (0.0, 1.0, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 8.0, 10.0):
         mark = "  <-- shipped" if bias == AIM_BIAS_DEG else ""
         print(line("bias %.1f deg%s" % (bias, mark), *regrade(sessions, rule, bias_deg=bias)))
+
+    print("\n=== cold start: the fires before the level tracker has a median ===")
+    print("  the shipped policy needs %d trips before it can move the lead; until then it"
+          % autorun.LEVEL_MIN_SAMPLES)
+    print("  aims with the %.0f ms constant, whatever the link is actually doing tonight."
+          % base)
+    seeds = previous_seed(sessions, base)
+    seed_of = seeds.get
+    for n in (3, 5):
+        head = first_fires(sessions, n)
+        if not head:
+            continue
+        shown = sum(len(f) for _, f in head)
+        print("  -- first %d fires per session (%d fires) --" % (n, shown))
+        print(line("SHIPPED (base %.0f ms)" % base, *regrade(head, shipped)))
+        print(line("seeded from the previous session",
+                   *regrade(head, seeded, base_of=seed_of)))
+        print(line("seeded from the previous session, COLD START ONLY",
+                   *regrade(head, seeded_cold_only, base_of=seed_of)))
+        for seed in (30, 33, 36, 40):
+            print(line("seeded at a fixed %d ms" % seed,
+                       *regrade(head, seeded, base_of=lambda _n, s=seed: float(s))))
+    print("  -- every fire, to confirm the fix costs nothing later --")
+    print(line("SHIPPED (base %.0f ms)" % base, *regrade(sessions, shipped)))
+    print(line("seeded from the previous session",
+               *regrade(sessions, seeded, base_of=seed_of)))
+    print(line("seeded from the previous session, COLD START ONLY",
+               *regrade(sessions, seeded_cold_only, base_of=seed_of)))
 
     print("\n=== per session, shipped policy against a fixed lead ===")
     print("  a policy that wins overall by losing a session is not an improvement")
@@ -217,4 +339,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    sys.exit(main(sys.argv) or 0)
