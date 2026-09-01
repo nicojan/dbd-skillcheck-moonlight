@@ -31,6 +31,8 @@ ZSHRC = os.environ.get("DBD_ZSHRC", os.path.expanduser("~/.zshrc"))
 TAIL_START = '  cd "$repo" || return 1'
 PENDING_START = "  # --- pending bouts (extracted by tools/test_dbd_shell.py) ---"
 PENDING_END = "  # --- end pending bouts ---"
+GAMEUP_START = "  # --- game already running (extracted by tools/test_dbd_shell.py) ---"
+GAMEUP_END = "  # --- end game already running ---"
 
 STUB_PYTHON = '''#!/usr/bin/env python3
 """Stands in for both .venv/bin/python entry points, told apart by the script argument."""
@@ -288,6 +290,68 @@ def test_no_review_env_skips_the_tui():
         check("...and the log is still complete", "SUMMARY: 0 dropped" in log, repr(log))
     finally:
         shutil.rmtree(repo)
+
+
+# --- the launch skips ------------------------------------------------------------------
+# `dbd` used to relaunch the game and sit through the settle wait unconditionally, so
+# restarting the bot after a Ctrl-C cost 34 s and a redundant Steam URL. Both skips are
+# probes against the outside world, which is exactly what a stub can stand in for.
+
+def _run_gameup(stub_ssh_exit, env=None):
+    """The game-already-running block, with `ssh` stubbed to a fixed exit code."""
+
+    block = extract(GAMEUP_START, GAMEUP_END)
+    tmp = tempfile.mkdtemp()
+    try:
+        stub = os.path.join(tmp, "ssh")
+        with open(stub, "w") as f:
+            f.write(f"#!/bin/sh\nexit {stub_ssh_exit}\n")
+        os.chmod(stub, 0o755)
+        script = (f'PATH="{tmp}:$PATH"\n'
+                  'host=compute\n'
+                  f'{block}\n'
+                  'fi\n'
+                  'print "GAME_UP=[$game_up]"\n')
+        e = dict(os.environ)
+        e.update(env or {})
+        out = subprocess.run(["zsh", "-c", script], capture_output=True, text=True, env=e)
+        return out.stdout
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_running_game_is_not_relaunched():
+    out = _run_gameup(0)
+    check("a running game is detected", "GAME_UP=[1]" in out, out.strip())
+    check("and says so instead of launching",
+          "already running" in out, out.strip())
+
+
+def test_absent_game_falls_through_to_launch():
+    out = _run_gameup(1)
+    check("no game means no skip", "GAME_UP=[]" in out, out.strip())
+    check("and nothing claims it is running",
+          "already running" not in out, out.strip())
+
+
+def test_unreachable_host_falls_through_to_launch():
+    # 255 is ssh's own "could not connect". The safe direction is to attempt the launch:
+    # a duplicate Steam URL is free, a silently skipped launch leaves you staring at a
+    # desktop for the length of a match.
+    out = _run_gameup(255)
+    check("an unreachable host does not read as 'running'",
+          "GAME_UP=[]" in out, out.strip())
+
+
+def test_gameup_probe_does_not_match_rungameid():
+    # The trap this check exists to avoid: steam.sh keeps `steam://rungameid/381210` in
+    # its argv for the life of the client, so a `rungameid` probe reads "running" every
+    # evening. Pin the pattern that actually goes over the wire.
+    block = extract(GAMEUP_START, GAMEUP_END)
+    check("the probe matches the game, not the steam URL",
+          "DeadByDaylight" in block and "rungameid" not in block, block)
+    check("and the probe cannot hang forever",
+          "ConnectTimeout" in block, block)
 
 
 def main():
