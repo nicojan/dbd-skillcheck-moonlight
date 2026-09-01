@@ -823,7 +823,8 @@ def test_the_loop_actually_prints_the_no_press_line():
     logdir = tempfile.mkdtemp()
     logpath = os.path.join(logdir, "landings-test.jsonl")
     try:
-        autorun.run(autorun.parse_args(["--no-wide", "--landing-log", logpath]))
+        autorun.run(autorun.parse_args(["--no-wide", "--landing-log", logpath,
+                                        "--link-state", logpath + ".state"]))
     finally:
         (autorun.AI_model, autorun.Monitoring_window,
          autorun.FocusWatcher, autorun.sleep) = saved
@@ -931,7 +932,9 @@ def test_the_loop_actually_uses_the_shortened_lead():
     try:
         # `--no-wide`: this drives the lead rules through the 224 path StubWindow models.
         # The wide path's own loop wiring is tested in test_wide_capture.py.
-        autorun.run(autorun.parse_args(["--no-wide"]))
+        autorun.run(autorun.parse_args(
+            ["--no-wide", "--link-state",
+             os.path.join(tempfile.mkdtemp(), "link_level.json")]))
     finally:
         (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
          autorun.sleep, autorun.decide, autorun.report_landing, autorun.fire) = saved

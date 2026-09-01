@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 
 from dbd.AI_model import AI_model
 from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
+from dbd.utils import link_state
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.clip_recorder import (DEFAULT_GAP_SECONDS, DEFAULT_MAX_GB,
@@ -282,6 +283,13 @@ def parse_args(argv=None):
                    help="disable predictive firing; react to the classifier as upstream does")
     p.add_argument("--round-trip-ms", type=float, default=ROUND_TRIP_MS,
                    help="measured keypress->pixel latency the prediction leads by")
+    p.add_argument("--link-state", default=link_state.DEFAULT_PATH,
+                   help="where the measured link level is stored between runs")
+    p.add_argument("--seed-lead", dest="seed_lead", action="store_true",
+                   help="start the lead from the level the last run measured, instead of "
+                        "the fixed constant, until the tracker has its own median (off by "
+                        "default: it converts early cold-start misses but costs a Great on "
+                        "a session whose link got slower — see tools/rescore_policy.py)")
     p.add_argument("--adapt-lead", dest="adapt_lead", action="store_true",
                    help="follow the measured round trip instead of holding the lead fixed "
                         "(off by default — it cost more Greats than it won; see adapt_lead)")
@@ -446,6 +454,25 @@ def lead_level_ms(base_lead_ms, trips,
         return base_lead_ms
     level = min(hi, max(lo, median(recent)))
     return level if abs(level - base_lead_ms) > deadband_ms else base_lead_ms
+
+
+def cold_start_base(base_lead_ms, trips, seed_ms,
+                    min_samples=LEVEL_MIN_SAMPLES):
+    """The base `lead_level_ms` should measure against, given a seed from the last run.
+
+    The seed applies ONLY while the tracker is short of `min_samples`. That narrowness is
+    the whole finding, not caution: `lead_level_ms` uses its base twice — as the fallback
+    before it has a median, and as the value its deadband compares every later median
+    against. Move both and a base sitting near the link's level pins the lead to the seed
+    for the rest of the session. Re-scored over every recorded landing, that costs 36
+    Greats in the recent link regime (164 -> 128) to save the same 2 misses this saves for
+    1. Swapping the base back the moment the tracker can stand alone keeps the fires the
+    seed was meant for and gives up nothing after them.
+    """
+
+    if seed_ms is None or len(trips) >= min_samples:
+        return base_lead_ms
+    return seed_ms
 
 
 def lead_for_check(base_lead_ms, last_trip_ms,
@@ -800,6 +827,12 @@ def run(args):
     log(f"firing: {'predictive' if args.predict else 'reactive only'}"
         + (f", leading by {args.round_trip_ms:.0f} ms"
            f"{' (adaptive)' if args.adapt_lead else ' (fixed)'}" if args.predict else ""))
+    seed_ms = (link_state.load(getattr(args, "link_state", link_state.DEFAULT_PATH))
+               if args.seed_lead else None)
+    if args.seed_lead:
+        log(f"  cold start: seeded at {seed_ms:.0f} ms from the last run"
+            if seed_ms is not None else
+            "  cold start: no usable stored level — holding the constant")
 
     landing_log = None
     if args.landing_log_enabled and not args.dry_run:
@@ -1023,7 +1056,8 @@ def run(args):
                 # The needle test is R - max(G,B) on a BGR array, so an RGB frame here
                 # silently measures blueness instead.
                 tracker = observe(tracker, frame_bgr, (captured - track_t0) * 1000.0)
-                base_lead_ms = lead_level_ms(lead_ms, recent_trips)
+                base_lead_ms = lead_level_ms(
+                    cold_start_base(lead_ms, recent_trips, seed_ms), recent_trips)
                 check_lead_ms = lead_for_check(base_lead_ms, last_trip_ms)
                 decision = decide(tracker, (monotonic() - track_t0) * 1000.0, check_lead_ms)
 
@@ -1167,6 +1201,21 @@ def run(args):
         if landing_log is not None:
             log(f"  {landing_log.written} freeze watches recorded in {landing_log.path}")
             landing_log.close()
+        # Written every run, seeded-or-not: a level nobody stored is a level nobody can
+        # turn the flag on with, and the write is worthless to THIS session by definition.
+        # Guarded on the attribute EXISTING, not on its value. Only `main`'s parser sets
+        # it, so a test that fabricates an args object writes nothing — which is the point:
+        # `test_landing_report` drives this very block with stub landings, and before this
+        # guard it stamped a 60.0 ms level into the repo's real state file. The next match
+        # would then have cold-started from a number no link ever produced. A test that can
+        # silently re-aim the bot is the worst kind of test.
+        state_path = getattr(args, "link_state", None)
+        measured = sorted(l.round_trip_ms for l in landings if l.round_trip_ms is not None)
+        if measured and state_path:
+            level = measured[len(measured) // 2]
+            if link_state.save(level, state_path):
+                log(f"  link level {level:.0f} ms stored for the next run"
+                    f"{'' if args.seed_lead else ' (enable with --seed-lead)'}")
         if args.wide:
             log("  " + sweeps.summary())
         if recorder is not None:

@@ -39,3 +39,6 @@ checks/
 # machine-local — a fresh clone anywhere else sees it as untracked. Taken from
 # upstream v4, the one line of that release worth having here.
 .venv/
+
+# per-machine runtime state: the link level carried between runs
+state/
