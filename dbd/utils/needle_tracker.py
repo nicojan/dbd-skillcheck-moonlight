@@ -218,7 +218,35 @@ GREAT_FALLBACK_DEG = 10.5  # measured; the simulator's default of 15 is 40% too 
 # 3.0 — the one late miss here is 2026-08-24 20:49:45, the 156 ms link spike, carried over
 # the trailing edge by the extra bias. If that mode shows up more than once a session, 3.0
 # is the largest bias with none of it, and it still takes misses 12 -> 8.
-AIM_BIAS_DEG = 4.5
+#
+# MOVED 4.5 -> 3.5 on 2026-08-31, re-scored over 1103 gradeable fires across 30 sessions —
+# the same instrument, 225 fires wider, and paired with `--seed-lead` which did not exist
+# when the table above was built. The seed removes EARLY cold-start misses, which is the
+# same failure the bias was buying off, so the bias no longer has to pay for them alone:
+#
+#                          whole record     recent link regime   sessions w/ MORE misses
+#     4.5 plain (was)       672G /  7M        164G / 5M          (baseline)
+#     4.5 + seed            666G /  7M        163G / 3M          1 of 30
+#     4.0 + seed            718G /  9M        177G / 3M          3 of 30
+#     3.5 + seed  <- now    771G /  9M        190G / 3M          3 of 30
+#     3.0 + seed            807G / 10M        198G / 2M          5 of 30
+#
+# 4.0 is DOMINATED and is why this is not a straight walk down the curve: same 9 misses,
+# same 3 regressed sessions, 53 fewer Greats than 3.5. 3.0 buys 36 more Greats but regresses
+# 5 sessions instead of 3, and the operator's stated order is misses first, Greats second.
+#
+# Against what actually shipped, 3.5 + seed is +99 Greats for +2 misses over 30 sessions —
+# about one extra failed check every fifteen matches — and on the link we are ON it is
+# strictly better: +26 Greats and 2 FEWER misses.
+#
+# The late-miss warning above does NOT argue against this. That mode is already live at
+# 4.5: the single late miss in the record (2026-08-24 20:49:45, the 156 ms link spike) is
+# present at every bias from 3.5 to 10.0 inclusive. Moving to 3.5 introduces nothing new.
+# 3.0 is still the largest bias with zero late misses, if that mode ever starts recurring.
+#
+# Re-run `tools/rescore_policy.py` after a few matches. The recent-regime miss counts here
+# are 2-5 events; the Great numbers are the well-supported half of this decision.
+AIM_BIAS_DEG = 3.5
 
 # How much of the success zone to leave in hand behind the aim. This is what stops a wide
 # bias from walking onto the trailing edge on a check whose zone is narrower than usual —
