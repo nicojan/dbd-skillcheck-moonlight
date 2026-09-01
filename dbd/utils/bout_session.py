@@ -77,9 +77,51 @@ def new_meta(content, geometry, started, gap_seconds, quality):
         "gap_seconds": gap_seconds,
         "quality": quality,
         "reviewed": False,
+        # Set while the recorder is still filling this directory, cleared by `_close_bout`.
+        # `find_bouts` hides an active bout so the review tool cannot `shutil.move` a
+        # directory out from under the writer threads. `writer_pid` is what makes the flag
+        # safe to trust — see `writer_alive`.
+        "active": True,
+        "writer_pid": os.getpid(),
         "frames": 0,
         "checks": [],
     }
+
+
+def writer_alive(meta):
+    """Whether the process that opened this bout is still running.
+
+    The `active` flag alone cannot be trusted: a `kill -9`, a panic, or a pulled power
+    cord leaves it set with nobody writing, and a bout that is hidden forever is exactly
+    the silent loss the pending notice exists to end — four bouts and 993 MB went
+    unnoticed on 2026-08-30 that way. So a bout is only live if its writer answers.
+
+    Signal 0 checks for existence without delivering anything. A recycled pid can keep one
+    orphan hidden until the next run, which is the safe direction to be wrong in: the
+    alternative is moving a directory a live recorder holds open.
+    """
+
+    if not meta.get("active"):
+        return False
+    pid = meta.get("writer_pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False        # active with no usable pid — treat as orphaned, not as live
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True         # alive, owned by someone else
+    except OSError:
+        return False
+    return True
+
+
+def mark_closed(meta):
+    """Clear the live marker. Returns `meta` so a caller can save in one step."""
+
+    meta["active"] = False
+    return meta
 
 
 def mark_reviewed(directory):
@@ -91,8 +133,12 @@ def mark_reviewed(directory):
     return True
 
 
-def find_bouts(root, include_reviewed=False):
-    """Every bout under `root`, oldest first. Skips `discard/` and reviewed bouts."""
+def find_bouts(root, include_reviewed=False, include_active=False):
+    """Every bout under `root`, oldest first.
+
+    Skips `discard/`, reviewed bouts, and bouts a live recorder is still writing. That
+    last one is what makes the review tool safe to run while a match is in progress.
+    """
 
     if not os.path.isdir(root):
         return []
@@ -107,6 +153,8 @@ def find_bouts(root, include_reviewed=False):
         if meta is None:
             continue
         if meta.get("reviewed") and not include_reviewed:
+            continue
+        if writer_alive(meta) and not include_active:
             continue
         found.append((directory, meta))
     return found

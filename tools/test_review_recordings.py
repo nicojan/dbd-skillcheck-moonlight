@@ -32,7 +32,8 @@ def check(name, ok, detail=""):
         FAILED.append(name)
 
 
-def make_bout(root, name, checks=2, reviewed=False, kind=bout_session.WIDE_BOUT):
+def make_bout(root, name, checks=2, reviewed=False, kind=bout_session.WIDE_BOUT,
+              active=None, writer_pid=None):
     directory = os.path.join(root, name)
     os.makedirs(directory, exist_ok=True)
     for i in range(3):
@@ -50,6 +51,10 @@ def make_bout(root, name, checks=2, reviewed=False, kind=bout_session.WIDE_BOUT)
         "checks": [{"at": "22:0%d:00" % i, "desc": "great", "path": "predictive"}
                    for i in range(checks)],
     }
+    if active is not None:
+        meta["active"] = active
+    if writer_pid is not None:
+        meta["writer_pid"] = writer_pid
     with open(os.path.join(directory, "bout.json"), "w") as f:
         json.dump(meta, f)
     return directory
@@ -289,6 +294,60 @@ def test_pty_q_quits_and_changes_nothing():
         left = drive_tui(root, [b" ", b"q"])
         check("q quits with nothing moved",
               left == ["bout_00", "bout_01", "bout_02"], str(left))
+    finally:
+        shutil.rmtree(root)
+
+
+# --- the live-bout guard ---------------------------------------------------------------
+# A bout the recorder is still filling must never reach the review list. `apply_selection`
+# moves a discarded bout with `shutil.move`, so offering a live one lets a keystroke pull
+# the directory out from under the writer threads mid-match. The flag is only half of it:
+# a `kill -9` leaves `active` set forever, and a bout that can never be reviewed is the
+# same silent loss the pending notice exists to end — so liveness is the writer's pid,
+# not the flag alone.
+
+def test_active_bout_with_live_writer_is_hidden():
+    root = tempfile.mkdtemp()
+    try:
+        make_bout(root, "bout_done")
+        make_bout(root, "bout_live", active=True, writer_pid=os.getpid())
+        names = [b.name for b in scan(root)]
+        check("a bout being written is not offered", names == ["bout_done"], str(names))
+    finally:
+        shutil.rmtree(root)
+
+
+def test_active_bout_with_dead_writer_is_offered():
+    root = tempfile.mkdtemp()
+    try:
+        # A pid that cannot be running: claimed, then reaped.
+        dead = os.fork()
+        if dead == 0:
+            os._exit(0)
+        os.waitpid(dead, 0)
+        make_bout(root, "bout_orphan", active=True, writer_pid=dead)
+        names = [b.name for b in scan(root)]
+        check("an orphaned bout survives its writer", names == ["bout_orphan"], str(names))
+    finally:
+        shutil.rmtree(root)
+
+
+def test_bout_without_active_key_is_offered():
+    root = tempfile.mkdtemp()
+    try:
+        make_bout(root, "bout_old")
+        names = [b.name for b in scan(root)]
+        check("a pre-flag bout still reviews", names == ["bout_old"], str(names))
+    finally:
+        shutil.rmtree(root)
+
+
+def test_closed_bout_is_offered():
+    root = tempfile.mkdtemp()
+    try:
+        make_bout(root, "bout_closed", active=False, writer_pid=os.getpid())
+        names = [b.name for b in scan(root)]
+        check("active=False reviews even with a live pid", names == ["bout_closed"], str(names))
     finally:
         shutil.rmtree(root)
 

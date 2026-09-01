@@ -254,6 +254,10 @@ class ClipRecorder:
             self.manifest = None
         if self.meta is not None:
             self.meta["frames"] = self.frames_written
+            # Clear the live marker before the last write, so the review tool can offer
+            # this bout the moment the recorder is done with it — and not one moment
+            # earlier, while a discard would race the writer threads.
+            bout_session.mark_closed(self.meta)
             self._save_meta()
         self.directory = None
         self.meta = None
