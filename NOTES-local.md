@@ -58,6 +58,8 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 ## Resume here
 
+**Presentation-layer tuning lives in `docs/audio-and-stream-tuning.md` (2026-09-01).** Operator-side audio and stream settings for playing Spirit, kept out of this file because none of it touches detection, aiming or lead. One thing there does constrain this file's work: the tracker's thresholds (`NEEDLE_REDNESS`, `MIN_NEEDLE_STRENGTH`, `HOT`, `MIN_CENTRE_PEAK`) are absolute 0-255 values, so **no pixel transform is permitted anywhere in the chain** — ReShade, client-side filters, HDR, and DBD's own in-game brightness/gamma slider all included. Shaders were considered and declined on those grounds, not on ban grounds. `yuv444 = 1` is flagged there as a candidate experiment for the video-leg question already open below.
+
 Read this section first; it is the state as of 2026-08-30.
 
 **2026-08-30 (00:40): the first armed match with `--record` was played, it worked, and Ctrl-C then ate half the evidence.** Both halves of that sentence matter, and the second one is the finding.
