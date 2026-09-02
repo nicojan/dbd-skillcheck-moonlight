@@ -246,7 +246,40 @@ GREAT_FALLBACK_DEG = 10.5  # measured; the simulator's default of 15 is 40% too 
 #
 # Re-run `tools/rescore_policy.py` after a few matches. The recent-regime miss counts here
 # are 2-5 events; the Great numbers are the well-supported half of this decision.
-AIM_BIAS_DEG = 3.5
+#
+# MOVED 3.5 -> 3.0 on 2026-09-01, re-scored over 1229 gradeable fires across 33 sessions,
+# and the reason it reverses the 08-31 call is that `--seed-lead` had never actually RUN
+# when that table was built. It ran for the first time on 2026-09-01 22:41 (`cold start:
+# seeded at 37 ms from the last run`): fire #1 opened at 36.8 instead of 60 against a 49 ms
+# trip and landed +7.5 LATE — a good, into 44 deg of trailing room, where the same fire had
+# MISSED early in each of the two preceding sessions. With the cold start handled at the
+# source, the bias stops paying for it:
+#
+#                          whole record     recent link regime   sessions w/ MORE misses
+#     4.5 + seed            742G /  9M        239G / 5M          0 of 33
+#     4.0 + seed            797G / 11M        256G / 5M          0 of 33
+#     3.5 + seed (was)      856G / 11M        275G / 5M          0 of 33
+#     3.0 + seed  <- now    896G / 12M        287G / 4M          2 of 33
+#     2.5 + seed            938G / 17M        301G / 6M          6 of 33
+#
+# 2.5 is the floor: 6 regressed sessions and 17 misses. 3.0 is the last value that is still
+# strictly better on the link we are ON — +12 Greats AND one FEWER miss than 3.5.
+#
+# The whole-record row shows 3.0 taking one MORE miss, and that single event is the entire
+# argument against it. It is not in the current regime: BOTH regressed sessions are
+# `260818-162457` and `260819-194107`, pre-08-20, from the ~61 ms link that no longer
+# exists. Across the last 12 sessions 3.0 regresses NOTHING — zero sessions with more
+# misses, zero with fewer Greats. Scoring a lead-sensitive constant on a regime you no
+# longer play is the exact failure `rescore_policy.py`'s own docstring warns about.
+#
+# This does NOT re-open the late-miss mode. 3.0 is the largest bias with zero late misses
+# in the record, so moving DOWN to it can only shrink that exposure.
+#
+# The instrument was `rp.seeded_cold_only` with `previous_seed`, not `rp.shipped` — scoring
+# the seed as an oracle over a session's own median measures a number that does not exist
+# at its first fire. Re-run after a few more seeded matches: only three sessions so far have
+# had `--seed-lead` engaged, and the miss counts here are still 1-2 events.
+AIM_BIAS_DEG = 3.0
 
 # How much of the success zone to leave in hand behind the aim. This is what stops a wide
 # bias from walking onto the trailing edge on a check whose zone is narrower than usual —
