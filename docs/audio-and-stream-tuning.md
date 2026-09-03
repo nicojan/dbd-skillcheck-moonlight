@@ -91,6 +91,33 @@ Ranked by expected effect on sigma: (1) > (3) > (2).
 - **HDR** (`hdr = 0`). Changes the whole luminance mapping.
 - **Engine.ini clarity configs** (no-grass, no-fog, brighter red stain). Disabled engine-side by BHVR; the widely-copied presets are placebo now.
 
+## Stream judder is external CPU load — not the stream, the recorder, or V-Sync (2026-09-03)
+
+**Symptom.** Panning and mouse movement go choppy at random during play. Not periodic, not correlated with skill checks, and — the detail that cracked it — **still present on the Steam screen after quitting DBD**, which rules out the game, the bot's decisions and anything scene-dependent in one observation.
+
+**Cause: an unrelated project's `next build` saturating the Mac.** Caught live at **123.8% CPU** with a twelve-worker fan-out (60-85% each), WindowServer starved at 58-70%, and a **1-minute load average of 43.8 on a 14-core M3 Max** — roughly 3x oversubscription. It ran at least twice in twenty minutes (23:58 and 00:11, `.next/BUILD_ID` mtime), launched from a Claude session sitting in `~/dev/human`. Nothing in this repo, this stream or this game was involved. Under 3x oversubscription the compositor cannot present on time, so every streamed frame arrives late regardless of what the link is doing.
+
+**Three explanations that were checked and are wrong.** Each is worth keeping, because each is the obvious first guess:
+
+1. **Not the recorder.** Measured on `frames/bout_20260902-233144` (2827 frames, 7 min). Every burst contains both halves of a natural experiment — the pre-roll frames were ring-buffered while nothing was being written, the tail frames while both encoder threads were saturated:
+
+   | | median | p90 | worst | >60 ms |
+   |---|---|---|---|---|
+   | pre-roll (not writing) | 28.0 ms | 34.3 | **479.0** | 19 |
+   | hot window (writing) | 27.9 ms | 36.4 | 127.2 | 23 |
+
+   Identical medians, and the worst stall of the match happened while the recorder wrote nothing. **Caveat, and it is a real one: this tests encoding and disk I/O only.** `ClipRecorder.offer` appends to the ring on *every* frame, so the ring is running in both columns and this experiment cannot see its cost. On 36 GB the few hundred MB of retained frames is not a plausible cause, but it is untested, not excluded.
+
+2. **Not V-Sync,** and the reasoning that got there is the transferable part. `vsync = 0` and `framepacing = 0` are set deliberately, to buy back the frame of latency the 40-43 ms round trip is calibrated against, and V-Sync off genuinely does let arrival jitter reach the eye unsmoothed. But **it has been off the whole time, and a constant cannot explain an onset.** It is a modifier — the machine has no buffer to absorb a stall — not a cause. Do not "fix" it: turning V-Sync on shifts the round trip and invalidates the lead constant and the seed.
+
+3. **Not the link.** No packet loss was needed to explain anything once the load was visible.
+
+**The one-step diagnostic, before any stream theory.** Run `uptime`. Above a load of ~6 on this machine the compositor is contended, and *anything* observed about the stream is a statement about the load rather than about the stream. Only below that is Moonlight's overlay (Settings -> "Show performance stats while streaming") worth reading, and it splits the remainder: network dropped frames means the link; a clean network with spiking decode/render means local contention.
+
+**Why this is a data-integrity finding and not just an operator annoyance.** Every constant in this project — `ROUND_TRIP_MS`, the seed, `AIM_BIAS_DEG` — is fitted to measured round trips. A match played under 3x oversubscription inflates those trips and adds jitter that is the scheduler's, not the link's, and it lands in the landings log looking exactly like link data. **A match played under load must not be scored.** The 23:31-23:38 bout on 2026-09-02 overlaps the window when builds were firing and carries a 479 ms stall in a stretch where the recorder wrote nothing; whether its trip distribution is shifted off the 40-43 ms baseline is **unchecked** — settle that before counting it toward the bias-3.0 evidence.
+
+**Cheap guard worth building:** the `dbd` launch already skips on preconditions. A load-average check there — refuse to arm, or warn loudly, above ~6 — would make it impossible to collect calibration data under a contended scheduler again. Not built.
+
 ## Status at close (2026-09-01)
 
 Done: music off, in-game Headphones off, SoundSource latency lowered, AUGraphicEQ curve applied to `Moonlight.app`, stereo confirmed.
