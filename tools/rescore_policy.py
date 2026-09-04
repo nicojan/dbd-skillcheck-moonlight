@@ -46,6 +46,19 @@ from dbd.utils import needle_tracker
 from dbd.utils.needle_tracker import AIM_BIAS_DEG, Zone, aim_bias_for, score_freeze
 
 MAX_PLAUSIBLE_TRIP_MS = 200.0   # past this it is a wrapped revolution, not a latency
+
+# A SCHEDULER STALL, which is a different animal from a wrapped revolution and needs its
+# own gate. `round_trip_ms` cannot see one: it is derived from the settled angle (see
+# autorun.py's `time_to_angle` call), so a stalled press and a slow link produce the same
+# number and reconstructing one from the other is exact to 0.01 deg over all 546 recorded
+# fires. `tail_read_ms` is the only independent reading — wall clock from key-down to the
+# freeze onset — and it is tightly bounded: the freeze watch grabs every ~27 ms and gives
+# up after three, so a legitimate tail read cannot exceed ~87 ms and p99 across the record
+# is 81.7. One fire in 546 breaks that ceiling (2026-09-02 23:37:28, tail 184.4 ms against
+# a trip of 181.0), and at 181 it slid under MAX_PLAUSIBLE_TRIP_MS and was being scored as
+# a real +43 deg landing. That is the whole content of the 2026-09-02 contamination
+# scare: not a poisoned session, one poisoned fire that nothing could name.
+MAX_TAIL_READ_MS = 120.0        # 1.4x the worst legitimate tail read on record
 HISTORIC_BIAS_DEG = 1.0         # the aim used before `aim_bias_deg` was logged per fire
 
 
@@ -79,6 +92,9 @@ def load_sessions(paths):
                     continue          # full-white zone; every landing in it would score Great
                 if not 0.0 < record["round_trip_ms"] < MAX_PLAUSIBLE_TRIP_MS:
                     continue
+                tail = record.get("tail_read_ms")
+                if tail is not None and tail > MAX_TAIL_READ_MS:
+                    continue      # the machine stalled under this press, not the link
                 fires.append((record, zone))
         if fires:
             out.append((os.path.basename(path), fires))
