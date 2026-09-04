@@ -33,6 +33,8 @@ PENDING_START = "  # --- pending bouts (extracted by tools/test_dbd_shell.py) --
 PENDING_END = "  # --- end pending bouts ---"
 GAMEUP_START = "  # --- game already running (extracted by tools/test_dbd_shell.py) ---"
 GAMEUP_END = "  # --- end game already running ---"
+LOAD_START = "  # --- load guard (extracted by tools/test_dbd_shell.py) ---"
+LOAD_END = "  # --- end load guard ---"
 
 STUB_PYTHON = '''#!/usr/bin/env python3
 """Stands in for both .venv/bin/python entry points, told apart by the script argument."""
@@ -352,6 +354,91 @@ def test_gameup_probe_does_not_match_rungameid():
           "DeadByDaylight" in block and "rungameid" not in block, block)
     check("and the probe cannot hang forever",
           "ConnectTimeout" in block, block)
+
+
+
+# --- the load guard --------------------------------------------------------------------
+# A contended scheduler inflates round_trip_ms indistinguishably from the link. On
+# 2026-09-02 two concurrent Claude sessions under ~/dev/human took the 1-min load average
+# to 43.8 on 14 cores; the recorder and V-Sync were both suspected and cleared before
+# anyone ran `uptime`. The guard is a NOTICE — the one property that must never regress is
+# that it plays on regardless, so every case below asserts a zero exit as well as its text.
+
+def _run_load(loadavg, ncpu="14", env=None):
+    """The load-guard block with `sysctl` stubbed. `loadavg` is its raw vm.loadavg text."""
+
+    block = extract(LOAD_START, LOAD_END)
+    tmp = tempfile.mkdtemp()
+    try:
+        stub = os.path.join(tmp, "sysctl")
+        with open(stub, "w") as f:
+            # -n vm.loadavg and -n hw.ncpu are the two reads; anything else is not ours.
+            f.write('#!/bin/sh\n'
+                    'case "$2" in\n'
+                    f'  vm.loadavg) {"printf" if loadavg is not None else "false"}'
+                    + (f' \'%s\\n\' \'{loadavg}\'' if loadavg is not None else "") + ' ;;\n'
+                    f'  hw.ncpu) {"printf" if ncpu is not None else "false"}'
+                    + (f' \'%s\\n\' \'{ncpu}\'' if ncpu is not None else "") + ' ;;\n'
+                    '  *) exit 1 ;;\n'
+                    'esac\n')
+        os.chmod(stub, 0o755)
+        script = f'PATH="{tmp}:$PATH"\ng() {{\n{block}\n}}\ng\n'
+        e = dict(os.environ)
+        e.pop("DBD_LOAD_GATE", None)
+        e.update(env or {})
+        out = subprocess.run(["zsh", "-f", "-c", script],
+                             capture_output=True, text=True, env=e)
+        return out.returncode, out.stdout + out.stderr
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_high_load_warns_and_does_not_block():
+    code, out = _run_load("{ 43.80 12.10 8.00 }")
+    check("a saturated machine is named", "43.80" in out and "14 cores" in out, out.strip())
+    check("and says the reading is the load, not the link", "LOAD, not the" in out, out.strip())
+    check("and says not to score it", "Do not score this match" in out, out.strip())
+    check("and STILL plays on", code == 0, f"exit {code}")
+
+
+def test_quiet_machine_says_nothing():
+    # The pending-bouts notice set the precedent: silent when there is nothing to say.
+    # A guard that prints every evening is a guard that stops being read.
+    code, out = _run_load("{ 1.42 1.90 2.10 }")
+    check("a quiet machine is silent", out.strip() == "", out.strip())
+    check("and exits clean", code == 0, f"exit {code}")
+
+
+def test_the_gate_is_overridable():
+    code, out = _run_load("{ 8.00 8.00 8.00 }", env={"DBD_LOAD_GATE": "20"})
+    check("a raised gate silences a load below it", out.strip() == "", out.strip())
+    code, out = _run_load("{ 3.00 3.00 3.00 }", env={"DBD_LOAD_GATE": "2"})
+    check("a lowered gate catches a load above it", "3.00" in out, out.strip())
+
+
+def test_an_unreadable_load_plays_on():
+    # Fail OPEN. A guard that blocks a launch over a parse slip has cost a match to
+    # prevent a footnote, and `sysctl` missing is exactly the shape that slip takes.
+    code, out = _run_load(None)
+    check("an unreadable load average warns", "could not read the load" in out, out.strip())
+    check("and does not block the launch", code == 0, f"exit {code}")
+
+
+def test_a_malformed_load_does_not_crash_the_shell():
+    # zsh arithmetic on a non-numeric string is a fatal error inside (( )), which would
+    # abort the whole `dbd` function — the 2026-08-29 failure mode, from a new direction.
+    for junk in ("{ n/a n/a n/a }", "{ }", "garbage"):
+        code, out = _run_load(junk)
+        check(f"junk load {junk!r} still plays on", code == 0, f"exit {code}: {out.strip()}")
+        check(f"junk load {junk!r} says so", "could not read the load" in out, out.strip())
+
+
+def test_the_guard_never_returns():
+    # The property under test is structural, not behavioural: no exit path at all. A
+    # `return` added here later would block a launch on a busy evening.
+    block = extract(LOAD_START, LOAD_END)
+    check("the load guard has no return/exit", 
+          not re.search(r"^\s*(return|exit)\b", block, re.M), block)
 
 
 def main():
