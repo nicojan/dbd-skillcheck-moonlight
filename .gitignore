@@ -42,3 +42,6 @@ checks/
 
 # per-machine runtime state: the link level carried between runs
 state/
+
+# session measurement scratch preserved alongside the handoff
+.claude/*.py
