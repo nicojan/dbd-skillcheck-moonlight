@@ -16,10 +16,12 @@ Second question, if you can watch for it: **does the check END when the bot pres
 
 ```bash
 source ~/.zshrc                 # the stale-shell trap: an old `dbd` silently drops flags
-type dbd | grep -c seed-lead    # must print 1
+functions dbd | grep -c seed-lead   # must print 1. NOT `type dbd`: see below
 cd ~/dev/dbd_autoSkillCheck && git log --oneline -1    # must be 1a76e29 or later
 uptime                          # note the 1-minute load, before AND after the match
 ```
+
+`functions dbd`, not `type dbd`. In zsh `type` prints only where a function lives — `dbd is a shell function from /Users/nicojan/.zshrc` — and never its body, so `type dbd | grep -c seed-lead` returns 0 whether the flag is present or not. That broken form sat in `NOTES-local.md` from 2026-09-01 until it was run here on 09-12 and answered 0 on a shell that had the flag.
 
 The load matters for the *rates*, not for this test. A match above the gate still answers the success/fail question fine; it just cannot be scored against the Great-rate record.
 
