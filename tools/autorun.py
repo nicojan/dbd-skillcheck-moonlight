@@ -590,6 +590,10 @@ def no_press_note(desc, tracker, decision, tracked_ms):
         note += f", fit {fit.rms_deg:.1f} deg RMS at {fit.rate_deg_s:+.0f} deg/s"
     if tracker.zone is None:
         note += ", no zone found"
+    elif tracker.zone.outline:
+        # Saying "Great" here would be a lie: an outline check draws no band at all.
+        note += (f", outline arc {tracker.zone.zone_start:.0f}-"
+                 f"{tracker.zone.zone_end:.0f} deg")
     else:
         note += (f", Great {tracker.zone.great_start:.0f}-{tracker.zone.great_end:.0f} deg")
     return note
@@ -630,7 +634,8 @@ def no_press_record(desc, tracker, decision, tracked_ms, context=None):
         fit_n=None if fit is None else fit.n,
         zone=None if zone is None else {
             "great_start": round(zone.great_start, 1), "great_end": round(zone.great_end, 1),
-            "zone_start": round(zone.zone_start, 1), "zone_end": round(zone.zone_end, 1)},
+            "zone_start": round(zone.zone_start, 1), "zone_end": round(zone.zone_end, 1),
+            "outline": zone.outline},
         # The whole point. (ms since the track began, angle, needle strength) per frame,
         # in the same shape the fires record their freeze watch in.
         samples=[[round(x.t_ms, 1), round(x.angle, 1), round(x.strength, 1)]
@@ -721,10 +726,15 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
                 "rate_deg_s": None if fit is None else round(fit.rate_deg_s, 1),
                 "fit_rms_deg": None if fit is None else round(fit.rms_deg, 2),
                 "fit_n": None if fit is None else fit.n,
+                # `outline` is recorded rather than inferred. `read_landings.gradeable`
+                # would reach the same answer from the great/span ratio, but an outline
+                # fire and a `full white` one are both "ungraded" and only this tells them
+                # apart in the log — which is the evidence this check was shipped to get.
                 "zone": {"great_start": tracker.zone.great_start,
                          "great_end": tracker.zone.great_end,
                          "zone_start": tracker.zone.zone_start,
-                         "zone_end": tracker.zone.zone_end},
+                         "zone_end": tracker.zone.zone_end,
+                         "outline": tracker.zone.outline},
                 "readings": [[round((r.t - pressed_at) * 1000.0, 1), round(r.angle, 1),
                               round(r.strength, 1)] for r in readings],
             })
@@ -1081,9 +1091,12 @@ def run(args):
                     pressed_at = fire(args, requested_ms)
 
                     fit = decision.fit
-                    log(f"{'WOULD FIRE' if args.dry_run else 'FIRE'} predictive: {desc} — "
-                        f"{fit.rate_deg_s:+.0f} deg/s, fit {fit.rms_deg:.1f} deg RMS over "
-                        f"{fit.n} frames, aiming {decision.target_deg:.1f} deg")
+                    kind = (f" [outline arc {tracker.zone.zone_start:.0f}-"
+                            f"{tracker.zone.zone_end:.0f} deg]"
+                            if tracker.zone is not None and tracker.zone.outline else "")
+                    log(f"{'WOULD FIRE' if args.dry_run else 'FIRE'} predictive: {desc}"
+                        f"{kind} — {fit.rate_deg_s:+.0f} deg/s, fit {fit.rms_deg:.1f} deg "
+                        f"RMS over {fit.n} frames, aiming {decision.target_deg:.1f} deg")
                     log(f"  timing: frame age {frame_age_ms:.0f} ms at decide, lead "
                         f"{requested_ms:.0f} ms requested / "
                         f"{(pressed_at - track_t0) * 1000 - now_ms:.0f} ms slept")

@@ -23,10 +23,11 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
 
 from dbd.utils.needle_tracker import (
-    AIM_BIAS_DEG, Fit, MIN_NEEDLE_STRENGTH, Reading, Sample, TrackerState, ZONE_KEEP_DEG,
-    Zone, aim_bias_for, decide,
-    fit_sweep, lit_floor, lit_span, read_watch, score_freeze, strength_reference,
-    time_to_angle, trim_frozen_tail, _longest_run,
+    AIM_BIAS_DEG, CENTRE_PRIOR, Fit, MIN_NEEDLE_STRENGTH, OUTLINE_AIM_DEG, OUTLINE_KEEP_DEG,
+    OUTLINE_MAX_DEG, OUTLINE_MIN_DEG, Reading, Sample, TrackerState, ZONE_KEEP_DEG,
+    Zone, aim_bias_for, decide, find_outline_arc, find_zone,
+    fit_sweep, leading_edge, lit_floor, lit_span, read_watch, score_freeze,
+    strength_reference, time_to_angle, trim_frozen_tail, _longest_run,
 )
 
 FAILURES = []
@@ -349,6 +350,162 @@ def test_the_lit_block_is_the_longest_run_not_the_first():
     watch = read_watch(gappy, reference=118.0)
     check("the longest lit run is the one judged", watch.outcome == "frozen", watch)
     check("and the dropped read is not in it", watch.lit == 4, watch)
+
+
+
+# --- the relocating outline check (`1234!`) ------------------------------------------
+
+def drawn_check(start_deg, width_deg, fill_px, centre=CENTRE_PRIOR, ring_r=65.0):
+    """A synthetic static image: the base ring everywhere, plus one arc over `width_deg`.
+
+    `fill_px` is the arc's RADIAL thickness, which is the only thing separating an outline
+    from a solid band — 2 px is what `1234!` and Merciless Storm both draw, 8 px is an
+    ordinary Great. Built as an image rather than as a Zone because the width bounds that
+    keep this off Storm live in the pixel reader, and a test that hands `find_outline_arc`
+    a ready-made Zone cannot exercise them.
+    """
+
+    img = np.zeros((224, 224), dtype=np.float32)
+    ys, xs = np.mgrid[0:224, 0:224]
+    r = np.hypot(xs - centre[0], ys - centre[1])
+    # Angle 0 is up and increases clockwise, matching `sample_rays`.
+    theta = np.rad2deg(np.arctan2(xs - centre[0], centre[1] - ys)) % 360.0
+
+    # The arc is drawn OUTSIDE the base ring, not over it. Overlapping them hides the
+    # first pixel of the arc: `find_outline_arc` subtracts the per-radius median over
+    # angle to remove the ring, so at a radius the ring occupies, the arc has to clear
+    # HOT above the ring's own brightness rather than above the dark background.
+    img[(r >= ring_r - 1.0) & (r <= ring_r + 1.0)] = 200.0   # base ring, every angle
+    on_arc = ((theta - start_deg) % 360.0) <= width_deg
+    img[on_arc & (r >= ring_r + 1.5) & (r <= ring_r + 1.5 + fill_px)] = 255.0
+    return img
+
+
+def test_find_outline_arc_reads_a_wide_unfilled_arc():
+    arc = find_outline_arc(drawn_check(130.0, 111.0, fill_px=2.0), CENTRE_PRIOR, 65.0)
+    check("a 111 deg outline arc is found", arc is not None)
+    if arc is not None:
+        check("...as an outline zone", arc.outline)
+        check("...at the drawn leading edge",
+              abs((arc.zone_start - 130.0 + 180.0) % 360.0 - 180.0) <= 4.0,
+              f"got {arc.zone_start}")
+        check("...with the drawn width",
+              abs(arc.zone_width - 111.0) <= 6.0, f"got {arc.zone_width}")
+
+
+def test_find_outline_arc_refuses_merciless_storm():
+    """THE safety test. Storm draws the same unfilled outline at 39-40 deg and the tracker
+    is supposed to abstain on it; a width floor is the only thing separating the two."""
+
+    for width in (13.0, 39.0, 56.0):      # the range measured across both Storm sets
+        arc = find_outline_arc(drawn_check(90.0, width, fill_px=2.0), CENTRE_PRIOR, 65.0)
+        check(f"a {width:.0f} deg outline (Merciless Storm) is refused", arc is None,
+              f"got {arc}")
+    check("the floor is what refuses them", OUTLINE_MIN_DEG > 56.0,
+          f"OUTLINE_MIN_DEG={OUTLINE_MIN_DEG}")
+    check("and the ceiling refuses a near-complete ring",
+          find_outline_arc(drawn_check(0.0, 300.0, fill_px=2.0), CENTRE_PRIOR, 65.0) is None)
+
+
+def test_find_outline_arc_refuses_anything_with_a_solid_band():
+    """`find_zone` returning None is not proof the check is an outline — it also returns
+    None for a band too narrow to pass MIN_GREAT_DEG. Aiming a 111 deg rule at one of
+    those would aim a leading-edge offset at a zone that has a real band."""
+
+    solid = drawn_check(130.0, 111.0, fill_px=8.0)
+    check("a solid 111 deg block is not an outline arc",
+          find_outline_arc(solid, CENTRE_PRIOR, 65.0) is None)
+    check("...because find_zone owns it", find_zone(solid, CENTRE_PRIOR, 65.0) is not None)
+
+
+def test_an_outline_zone_is_never_graded():
+    """It has no Great band to have landed in, so a press there is a hit, not a Great."""
+
+    outline = Zone(great_start=10.0, great_end=121.0, zone_start=10.0, zone_end=121.0,
+                   outline=True)
+    check("an outline zone reports no measured Great band", not outline.great_measured)
+    check("a landing inside it is ungraded, not GREAT",
+          score_freeze(outline, 60.0)[0] == "ungraded", score_freeze(outline, 60.0))
+    check("a landing outside it is still a MISS",
+          score_freeze(outline, 200.0)[0] == "MISS", score_freeze(outline, 200.0))
+
+
+def test_leading_edge_follows_the_direction_of_travel():
+    zone = Zone(great_start=10.0, great_end=121.0, zone_start=10.0, zone_end=121.0,
+                outline=True)
+    check("clockwise, the needle meets zone_start first",
+          leading_edge(zone, +300.0) == 10.0)
+    check("counter-clockwise (Madness), it meets zone_end first",
+          leading_edge(zone, -300.0) == 121.0)
+
+
+def outline_state(rate, needle_now, edge_offset, width=111.0, n=8, dt_ms=25.0):
+    """A tracker sitting `edge_offset` deg (along travel) short of a `width` deg arc."""
+
+    start = (needle_now - rate * (n - 1) * dt_ms / 1000.0) % 360.0
+    samples = sweep_samples(rate, start_deg=start, n=n, dt_ms=dt_ms)
+    direction = 1.0 if rate > 0 else -1.0
+    edge = (needle_now + edge_offset * direction) % 360.0
+    far = (edge + width * direction) % 360.0
+    zone = Zone(great_start=edge, great_end=far,
+                zone_start=edge if rate > 0 else far,
+                zone_end=far if rate > 0 else edge, outline=True)
+    return samples, TrackerState(samples=samples, zone=zone, centre_fixed=True)
+
+
+def test_decide_presses_only_once_the_needle_is_inside_the_outline_arc():
+    """The press is the SOONEST landing inside the arc, never a scheduled wait. The arc
+    expires on its own ~679 ms timer, so anything the tracker waits for it may not live
+    to see — and a press aimed a whole revolution ahead is a press onto nothing."""
+
+    for rate in (300.0, -300.0):
+        # Needle 90 deg short of the arc: a press now lands well before it.
+        samples, state = outline_state(rate, needle_now=0.0, edge_offset=90.0)
+        d = decide(state, samples[-1].t_ms, round_trip_ms=46.0)
+        check(f"short of the arc, no press is scheduled at {rate:+.0f} deg/s",
+              d.press_at_ms is None and "short of the arc" in d.reason, d.reason)
+        check(f"...and it does not fall back to reacting at {rate:+.0f} deg/s",
+              not d.may_react, d.reason)
+
+        # Needle just inside: a press now lands OUTLINE_AIM_DEG or more past the edge.
+        samples, state = outline_state(rate, needle_now=0.0, edge_offset=-5.0)
+        now = samples[-1].t_ms
+        d = decide(state, now, round_trip_ms=46.0)
+        travel = abs(rate) * 46.0 / 1000.0
+        check(f"inside the arc, the press goes immediately at {rate:+.0f} deg/s",
+              d.press_at_ms is not None and abs(d.press_at_ms - now) < 1e-6, d.reason)
+        if d.press_at_ms is not None:
+            landed = ((d.target_deg - state.zone.zone_start) * (1 if rate > 0 else -1)) % 360.0
+            if rate < 0:
+                landed = ((state.zone.zone_end - d.target_deg)) % 360.0
+            check(f"...landing inside the arc at {rate:+.0f} deg/s",
+                  OUTLINE_AIM_DEG <= landed <= 111.0 - OUTLINE_KEEP_DEG,
+                  f"landed {landed:.1f} deg past the leading edge")
+            check(f"...exactly one round trip ahead at {rate:+.0f} deg/s",
+                  abs(d.lands_at_ms - d.press_at_ms - 46.0) < 1e-6
+                  and abs(travel - abs(rate) * 0.046) < 1e-9)
+
+        # Needle near the far end: declined rather than aimed at the trailing edge.
+        samples, state = outline_state(rate, needle_now=0.0, edge_offset=-90.0)
+        d = decide(state, samples[-1].t_ms, round_trip_ms=46.0)
+        check(f"past the arc, no press is scheduled at {rate:+.0f} deg/s",
+              d.press_at_ms is None and "trailing edge" in d.reason, d.reason)
+
+
+def test_the_outline_path_leaves_ordinary_checks_alone():
+    """A drawn zone with a real Great band must aim at the band, not at a leading edge."""
+
+    samples = sweep_samples(320.0, start_deg=0.0, n=8)
+    now = samples[-1].t_ms
+    here = (320.0 * now / 1000.0) % 360.0
+    mid = (here + 120.0) % 360.0
+    zone = Zone(great_start=(mid - 5.0) % 360.0, great_end=(mid + 5.0) % 360.0,
+                zone_start=(mid - 5.0) % 360.0, zone_end=(mid + 44.0) % 360.0)
+    d = decide(TrackerState(samples=samples, zone=zone, centre_fixed=True), now, 72.0)
+    check("an ordinary zone still aims at great_mid plus the bias",
+          d.press_at_ms is not None
+          and abs((d.target_deg - (zone.great_mid + aim_bias_for(zone))) % 360.0) < 1e-6,
+          f"{d.reason} target={d.target_deg}")
 
 
 def main():

@@ -15,6 +15,7 @@ release*/
 frames/
 recordings/
 recordings_missed/
+recordings_1234/
 scan_hits/
 
 .DS_Store
