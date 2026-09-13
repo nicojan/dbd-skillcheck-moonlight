@@ -71,84 +71,6 @@ MAX_GREAT_DEG = 20.0  # ...and the other end of that same fact. A `full white` c
                       # tally from 78% to 84%. Grade only a band we actually measured.
 CLOSE_DEG = 4.0       # bridge dropouts this short; antialiasing punches 1-2 deg holes
 
-# --- the relocating outline check ----------------------------------------------------
-#
-# A perk the operator calls `1234!` draws a check the tracker abstained on entirely: four
-# of them on 2026-09-11 (23:17:06, 23:23:01, 23:29:00, 23:32:14) produced four NO PRESS
-# lines and nothing else. Exported to `recordings_1234/`, all four read identically:
-#
-#   * ONE arc, 109-113 deg wide, drawn as the two thin rails of an ordinary GOOD zone —
-#     max fill run 2.0-2.2 px against `FILL_RUN_PX`'s 4.0. There is no solid band, so
-#     `find_zone` correctly returns None and `MIN_GREAT_DEG` correctly refuses to invent
-#     one. Everything below sits on the None path and changes nothing above it.
-#   * The needle sweeps at 299-300 deg/s, constant to within a sliding-window 293-306,
-#     fitting at 1.73-1.87 deg RMS. The 15 deg RMS the live log reported is the FROZEN
-#     TAIL: the check runs 2.90 s against `MAX_SAMPLES`'s ~1.5 s, so by the end the window
-#     holds only the ~300 ms of stopped needle that follows it. The needle read was never
-#     the problem.
-#   * The arc RELOCATES to a fresh position 4-5 times per check, on a TIMER of roughly
-#     679 ms (the eleven epochs the recordings catch whole: mean 679, sd 55; over all
-#     14 including the two the recording truncates, mean 630, sd 99). It was tempting to read it as relocating when the needle arrives
-#     at it — the first two epochs checked by hand happened to fit — and that is wrong:
-#     scored over all 14, "duration equals the needle's travel time to the next arc"
-#     predicts 55-1178 ms against 508-760 observed, an R^2 of -29.9 against a constant.
-#     The arc's life has nothing to do with where the needle is.
-#
-# Two things follow, and they are the whole policy. The arc is a genuine 111 deg success
-# zone, so the press does not have to thread a leading edge — anywhere inside it is inside
-# it. But the zone EXPIRES, so the press has to be the soonest one that lands inside
-# rather than the best-placed one: waiting for the middle, or for the next approach to the
-# leading edge, waits ~600 ms on average for a zone that lives ~679. Hence `decide` takes
-# the earliest landing that clears OUTLINE_AIM_DEG past the leading edge and stays
-# OUTLINE_KEEP_DEG short of the trailing one, and presses immediately when the needle is
-# already inside.
-#
-# What that leaves unfixable is the round trip itself: the zone read is at most one frame
-# old when the key is sent, but the key still takes ~46 ms to arrive, and an arc that
-# expires inside that window is a press onto nothing. At a 679 ms life that is ~7% of
-# presses and no constant here can reduce it.
-#
-# OUTLINE_MAX_DEG is the Merciless Storm guard and the reason this cannot quietly turn the
-# Storm abstention into a press. Storm draws the same unfilled outline at 39-40 deg
-# (`recordings_video/merciless-storm`, 13-40 over every frame) and Madness Storm at 37-56;
-# `1234!` never reads below 106. A floor of 90 separates them with 34 deg of daylight, and
-# the stability rule below discards the isolated wide reads that Madness Storm's unstable
-# frames throw off. NOTHING here fires on Storm, and the withdrawn Storm recommendation in
-# NOTES is untouched.
-OUTLINE_MIN_DEG = 90.0
-OUTLINE_MAX_DEG = 140.0
-OUTLINE_AIM_DEG = 10.0      # clearance kept past the leading edge, along the sweep
-OUTLINE_KEEP_DEG = 15.0     # ...and short of the trailing one. Landing error runs to
-                            # +17.5 deg late on this link, so a press aimed nearer the
-                            # trailing edge than this is a press aimed at leaving the zone.
-OUTLINE_STABLE_DEG = 8.0    # how closely consecutive reads of the leading edge must agree
-OUTLINE_STABLE_FRAMES = 3   # ...and over how many, before the arc is worth aiming at
-OUTLINE_FIRED_MEMORY = 3    # arcs kept on the already-pressed list. Only ever needs to
-                            # cover the span between a press and the next arc settling —
-                            # remembering more would start refusing a genuinely new arc
-                            # that happens to relocate back onto an old position.
-# What the arc's life buys, and what it forbids. The needle needs on average half a
-# revolution — ~600 ms at 300 deg/s — to reach an arc it is not already inside, which is
-# the whole of an arc's ~650 ms. Scheduling that press anyway is what the first version of
-# this did, and on all four recorded checks it landed 4.8-13.0 deg inside an arc that had
-# already relocated. So a press is only scheduled if it lands inside the arc's own
-# lifetime, and otherwise the tracker waits for the next arc. Declining costs nothing:
-# the needle is inside the arc when it appears 111/360 of the time and can reach it in
-# time another 150/360, so ~73% of arcs are pressable and a check draws four or five.
-#
-# Nothing here models how long an arc has left, and two versions that did are why. The
-# arc's life is 679 ms mean with an sd of 55 (the eleven epochs the recordings catch whole)
-# and the tracker cannot see when one was born unless it watched the previous one go, so
-# any "will this arc still be there in N ms" test is a bet on a distribution. Betting long
-# put all four presses onto arcs that had already relocated; betting short declined all
-# four, including presses onto arcs that were VISIBLY still drawn at the time.
-#
-# So the tracker does not bet at all. It schedules nothing ahead: a press is issued only
-# on a frame where the needle is ALREADY inside the arc that frame shows, which makes the
-# exposure exactly one round trip — the irreducible gap between reading a pixel and the
-# key arriving — rather than a guess about the next half second. At a 679 ms life a 46 ms
-# round trip is ~7% exposure, and that is the whole of it.
-
 # --- fitting and firing --------------------------------------------------------------
 MIN_ZONE_FRAMES = 5      # frames of static UI needed before the zone median is trustworthy
 ZONE_RETRY_EVERY = 3     # frames between retries while no zone has been found
@@ -394,7 +316,6 @@ class Zone:
     great_end: float
     zone_start: float
     zone_end: float
-    outline: bool = False   # drawn with no solid band at all; see OUTLINE_MIN_DEG
 
     @property
     def great_width(self) -> float:
@@ -416,15 +337,8 @@ class Zone:
         real band reaches, and a band filling its own zone. A graded check sits at
         10-11 deg inside a 49 deg zone; the `full white` degenerate case sits at 33-59
         inside 33-60, a ratio of ~1.0 that no drawn check has.
-
-        An outline zone says so outright rather than leaving it to the ratio. The ratio
-        would reach the same answer today — an outline arc fills its own zone exactly —
-        but it would reach it by accident, and a check drawn as an outline is a check
-        whose Great geometry was never measured no matter what the numbers happen to be.
         """
 
-        if self.outline:
-            return False
         return (self.great_width <= MAX_GREAT_DEG
                 and self.great_width < 0.9 * self.zone_width)
 
@@ -461,16 +375,6 @@ class TrackerState:
     centre_fixed: bool = False
     zone: Optional[Zone] = None
     fired_at_ms: Optional[float] = None
-    # Leading edges of the last few outline reads. An outline arc is only worth aiming at
-    # once consecutive frames agree on where it is: Madness Storm throws isolated wide
-    # reads off frames where the needle lies along the outline, and one of those is all it
-    # would take to press on a check the tracker is supposed to abstain on.
-    outline_edges: Tuple[float, ...] = ()
-    # Trailing edges of the outline arcs this tracker has already pressed. A relocating
-    # outline check is not over when a press goes out, so the tracker stays live across
-    # one — and this is what stops it pressing the same arc again on the next frame while
-    # the needle is still inside it. See `mark_fired`.
-    fired_edges: Tuple[float, ...] = ()
 
 
 # --- primitives ----------------------------------------------------------------------
@@ -762,69 +666,6 @@ def find_zone(static, centre, ring_r, angle_step=ANGLE_STEP):
     )
 
 
-def leading_edge(zone, rate_deg_s):
-    """The end of `zone` the needle reaches FIRST, given which way it is turning.
-
-    Clockwise the needle enters at `zone_start`; on a Madness check it is turning the
-    other way and enters at `zone_end`. Aiming a fixed offset off the wrong edge on a
-    111 deg arc misses by the whole width of it, and Madness is exactly the case no
-    recording can catch — `merciless-storm-madness2` is reversed footage of a check that
-    draws no band, so it can never score a press either.
-    """
-
-    return zone.zone_start if rate_deg_s > 0 else zone.zone_end
-
-
-def find_outline_arc(static, centre, ring_r, angle_step=ANGLE_STEP):
-    """The drawn arc of a relocating outline check, as a Zone, or None.
-
-    Consulted only where `find_zone` has already returned None, and deliberately narrow:
-    it answers "is there one wide arc here, drawn as an outline and nothing else", and
-    refuses everything else. See OUTLINE_MIN_DEG for the measurements and for why the
-    width bounds are what keep Merciless Storm on the abstention path.
-
-    Read from ONE frame, not from the static median every other zone read uses. The whole
-    point of this check is that the arc moves — four to five times in 2.9 s — and a median
-    over `STATIC_FRAMES` spanning ~0.7 s straddles a jump and smears two positions into
-    one. A single frame is enough because the arc is bright and the needle is masked out
-    of it by `static_image` the same way.
-    """
-
-    radii = np.arange(ring_r + WINDOW_IN, ring_r + WINDOW_OUT, RADIUS_STEP)
-    angles, polar = sample_rays(static, centre[0], centre[1], radii, angle_step=angle_step)
-    resid = polar - np.median(polar, axis=0, keepdims=True)
-    hot = resid > HOT
-
-    # Any solid fill at all and this is not our check. `find_zone` returning None is not
-    # proof the check is an outline: it also returns None when a real band is drawn too
-    # narrow to pass MIN_GREAT_DEG, and aiming at a leading edge on one of those would be
-    # aiming a 111 deg rule at a 49 deg zone.
-    # The exact complement of `find_zone`'s Great-band test, deliberately expressed the
-    # same way: a contiguous angular RUN of filled angles, not any single filled angle.
-    # `.any()` was the first attempt and it refused every real check — compression speckle
-    # puts 3-4 scattered angles of an outline arc over FILL_RUN_PX out of 360. Note
-    # `_max_contiguous` already returns pixels; scaling it by RADIUS_STEP again, which was
-    # the second attempt, made the guard 4x too lenient and let a solid band through.
-    runs = np.array([_max_contiguous(hot[i]) for i in range(hot.shape[0])])
-    band = _longest_run(runs >= FILL_RUN_PX, angle_step)
-    if band is not None and band[1] * angle_step >= MIN_GREAT_DEG:
-        return None
-
-    thickness = hot.sum(axis=1) * RADIUS_STEP
-    found = _longest_run(_close_gaps(thickness >= ZONE_THICK_PX, angle_step), angle_step)
-    if found is None:
-        return None
-
-    start, length = found
-    width = length * angle_step
-    if not (OUTLINE_MIN_DEG <= width <= OUTLINE_MAX_DEG):
-        return None
-
-    edge = float(angles[start])
-    return Zone(great_start=edge, great_end=(edge + width) % 360.0,
-                zone_start=edge, zone_end=(edge + width) % 360.0, outline=True)
-
-
 def fit_sweep(samples):
     """Straight-line fit of angle against time, or None if the samples cannot support one.
 
@@ -901,39 +742,6 @@ def observe(state, frame, t_ms):
         # frame, so retry periodically rather than every frame.
         new = replace(new, zone=find_zone(static_image(new.frames), new.centre, new.ring_r))
 
-    # Only where no drawn zone has been found, and never over one: a check with a real
-    # band is that check's business and nothing here may touch it. Run EVERY frame rather
-    # than on ZONE_RETRY_EVERY — the arc moves, so a stale read is a wrong read, not just
-    # a late one — which costs 3.3 ms of the frame (1.7 to mask one frame, 1.6 to read it)
-    # and only on frames that have no zone anyway.
-    if new.centre_fixed and (new.zone is None or new.zone.outline):
-        arc = find_outline_arc(static_image(new.frames[-1:]), new.centre, new.ring_r)
-        # An arc is identified — and its stability judged — by its TRAILING edge. The
-        # leading one is not a fixed quantity once the needle arrives: `static_image`
-        # blanks the needle and its glow, so the arc reads as starting 6-12 deg ahead of
-        # wherever the needle currently is. Keying on that reads one arc as a procession
-        # of new ones, and, worse, leaves `decide` comparing the needle against an edge
-        # that runs away from it exactly as fast as the needle chases it — which is why
-        # the first version of this never once took the "already inside" branch.
-        edges = (new.outline_edges + ((arc.zone_end,) if arc else ()))[-OUTLINE_STABLE_FRAMES:]
-        new = replace(new, outline_edges=() if arc is None else edges)
-        settled = (arc is not None
-                   and len(edges) == OUTLINE_STABLE_FRAMES
-                   and max(abs((e - edges[-1] + 180.0) % 360.0 - 180.0) for e in edges)
-                   <= OUTLINE_STABLE_DEG)
-        if settled:
-            same = (new.zone is not None and new.zone.outline
-                    and abs((new.zone.zone_end - arc.zone_end + 180.0) % 360.0 - 180.0)
-                    <= OUTLINE_STABLE_DEG)
-            # Keep the zone read when this arc was ACQUIRED, not the latest read of it:
-            # that one was taken before the needle got near the leading edge, so it is the
-            # only clean measurement of where the arc actually starts.
-            new = replace(new, zone=new.zone if same else arc)
-        elif new.zone is not None and new.zone.outline:
-            # The arc has jumped or gone. Drop it, so `decide` stops holding a press
-            # scheduled for where the arc WAS. Only ever clears a zone set just above.
-            new = replace(new, zone=None)
-
     return new
 
 
@@ -973,50 +781,6 @@ def decide(state, now_ms, round_trip_ms=ROUND_TRIP_MS):
     if state.zone is None:
         return Decision(reason="no zone drawn yet", fit=fit, may_react=True)
 
-    if state.zone.outline:
-        # One press per arc. The tracker stays live across an outline fire, so without this
-        # the needle — which is sitting inside the arc it was just aimed at — would satisfy
-        # the "already inside" branch again on the very next frame and go on satisfying it
-        # for the ~370 ms it takes to cross a 111 deg arc. `may_react` stays False: this is
-        # an arc already acted on, not a check with nowhere to aim.
-        if any(abs((e - state.zone.zone_end + 180.0) % 360.0 - 180.0) <= OUTLINE_STABLE_DEG
-               for e in state.fired_edges):
-            return Decision(reason="already pressed this arc", fit=fit)
-
-        # The SOONEST landing inside the arc, not the best-placed one — the zone expires
-        # on a ~679 ms timer, so a better-placed press that waits is a press onto nothing.
-        # See
-        # OUTLINE_MIN_DEG. `AIM_BIAS_DEG` is deliberately not applied on top: it corrects
-        # the centre of a Great band, and there is no band here to centre on.
-        direction = 1.0 if fit.rate_deg_s > 0 else -1.0
-        edge = leading_edge(state.zone, fit.rate_deg_s)
-        # Where a press issued this instant would land. Nothing else is ever aimed at.
-        soonest = fit.angle_at(now_ms) + fit.rate_deg_s * round_trip_ms / 1000.0
-        into = ((soonest - edge) * direction) % 360.0
-        width = state.zone.zone_width
-
-        # Not schedulable YET is the normal case and not a refusal: the needle is coming
-        # round to the arc and a later frame will say go. `may_react` stays False through
-        # all of it — there is a plan here, and the classifier has no class for this check
-        # anyway, so the reactive path has nothing better to offer.
-        if into > width:
-            return Decision(reason=f"needle {360.0 - into:.0f} deg short of the arc",
-                            fit=fit)
-        if into < OUTLINE_AIM_DEG:
-            return Decision(reason=f"needle {OUTLINE_AIM_DEG - into:.0f} deg short of the "
-                                   f"aim point inside the arc", fit=fit)
-        if into > width - OUTLINE_KEEP_DEG:
-            # Too near the trailing edge to risk. A check draws four or five arcs, so
-            # waiting for the next costs nothing this one would reliably have won.
-            return Decision(reason="arc's trailing edge too close", fit=fit)
-
-        # Returned here rather than falling through, because the outline press is always
-        # immediate: the target IS where the needle will be one round trip from now, so
-        # the generic `time_to_angle` round-trip would compute `press_at == now_ms` and
-        # then lose that tie to float error in the "too late" guard below.
-        return Decision(press_at_ms=now_ms, reason="scheduled", fit=fit,
-                        target_deg=soonest % 360.0, lands_at_ms=now_ms + round_trip_ms)
-
     # Never bias past the zone's own trailing edge: on a narrow zone — Unnerving Presence
     # and Overcharge both shrink it — a fixed offset would aim clean out of it.
     bias = aim_bias_for(state.zone)
@@ -1044,24 +808,7 @@ def mark_fired(state, t_ms):
     a safety property that depends on every caller remembering to do something is not a
     safety property. Firing twice into one check would land the second press outside the
     zone and fail a check the first press had already won.
-
-    A relocating outline check is the one exception, and it is not an exception to the
-    safety property but to what "one check" means. It draws a fresh arc every ~650 ms and
-    runs on through several of them; each arc is its own opportunity and the check does
-    not end when a press connects — the needle does not even stop. So the arc, not the
-    check, is what gets retired, identified by its TRAILING edge the same way `observe`
-    identifies one. The tracker stays live for the next arc.
-
-    That invariant used to be held by the live loop instead — drop the tracker, sleep
-    HIT_COOLDOWN_SECONDS, and before that spend FREEZE_WATCH_SECONDS watching for a freeze
-    this check can never produce. It worked, at the cost of 1.30 s blind after every press
-    against a ~1.2 s revolution, which is a whole revolution of arcs unseen. Ten fires in
-    the 2026-09-12 match, every one of them "still sweeping 800 ms after the press".
     """
-
-    if state.zone is not None and state.zone.outline:
-        edges = (state.fired_edges + (state.zone.zone_end,))[-OUTLINE_FIRED_MEMORY:]
-        return replace(state, fired_edges=edges)
 
     return replace(state, fired_at_ms=t_ms)
 
