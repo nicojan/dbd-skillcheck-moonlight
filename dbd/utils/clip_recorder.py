@@ -137,7 +137,7 @@ class ClipRecorder:
                  pre_seconds=DEFAULT_PRE_SECONDS, post_seconds=DEFAULT_POST_SECONDS,
                  gap_seconds=DEFAULT_GAP_SECONDS, quality=DEFAULT_QUALITY,
                  workers=DEFAULT_WORKERS, max_gb=DEFAULT_MAX_GB,
-                 clock=monotonic, writer=None):
+                 clock=monotonic, writer=None, watch_keys=False):
         self.root = root
         self.content = content or {}
         self.geometry = geometry or {}
@@ -149,10 +149,20 @@ class ClipRecorder:
         self.clock = clock
         self.writer = writer if writer is not None else ClipWriter(quality, workers)
 
+        self.watch_keys = watch_keys
+
         self.ring = deque()             # (t, frame) newest last
+        # Presses seen before a bout was open, evicted by age exactly like the ring. A
+        # press in the lead-in belongs to the clip the ring is about to flush, so the two
+        # buffers have to hold the same window or the first beat of a check loses its
+        # keystroke while its frames survive.
+        self.key_ring = deque()
         self.directory = None
         self.meta = None
         self.manifest = None
+        self.keys_file = None
+        self.keys_written = 0           # this bout
+        self.keys_total = 0             # this session
         self.frames_written = 0         # this bout
         self.total_written = 0          # this session
         self.bouts = 0
@@ -190,6 +200,45 @@ class ClipRecorder:
             self.ring.popleft()
         while len(self.ring) > RING_MAX_FRAMES:
             self.ring.popleft()
+        while self.key_ring and self.key_ring[0]["t"] < cutoff:
+            self.key_ring.popleft()
+
+    # --- operator key presses ---------------------------------------------------------
+
+    def note_key(self, event):
+        """One press from `KeyWatcher.drain`, placed on this bout's frame timeline.
+
+        Written immediately whenever a bout is open — including between clips, where the
+        frames are not being kept. A keystroke is one line and the whole point of it is to
+        label what the pixels cannot, so the cheap thing is to keep them all and let the
+        reader window them; dropping the ones outside a clip would silently discard the
+        presses on either side of a check, which is where the interesting ones are.
+
+        Before any bout exists the press goes to `key_ring` and is flushed by `_open_bout`,
+        so the lead-in the ring is about to write keeps its keystrokes.
+        """
+
+        if not self.watch_keys:
+            return False
+        if self.directory is None:
+            self.key_ring.append(dict(event))
+            self._evict(self.clock())
+            return False
+        return self._write_key(event)
+
+    def _write_key(self, event):
+        if self.keys_file is None or self._t0 is None:
+            return False
+        t_ms = round((event["t"] - self._t0) * 1000.0, 1)
+        self.keys_file.write(
+            '{"t_ms": %s, "keycode": %d, "source": %d}\n'
+            % (t_ms, int(event.get("keycode", -1)), int(event.get("source", -1))))
+        self.keys_file.flush()
+        self.keys_written += 1
+        self.keys_total += 1
+        if self.meta is not None:
+            self.meta["keys"] = self.keys_written
+        return True
 
     # --- triggers --------------------------------------------------------------------
 
@@ -243,15 +292,32 @@ class ClipRecorder:
         self.manifest = open(os.path.join(directory, bout_session.MANIFEST_FILE),
                              "a", encoding="utf-8")
         self.frames_written = 0
+        self.keys_written = 0
         self._last_written_t = None
         self._t0 = now
         self.bouts += 1
+
+        if self.watch_keys:
+            self.meta["keys_watched"] = True
+            self.keys_file = open(os.path.join(directory, bout_session.KEYS_FILE),
+                                  "a", encoding="utf-8")
+            # `_t0` is `now`, so a press from the lead-in stamps NEGATIVE — the same
+            # convention the manifest already uses for the ring's frames. Anything older
+            # than the ring holds has already been evicted and is not ours to write.
+            for event in list(self.key_ring):
+                if event["t"] >= now - self.pre_seconds:
+                    self._write_key(event)
+            self.key_ring.clear()
+            self._save_meta()
         return directory
 
     def _close_bout(self):
         if self.manifest is not None:
             self.manifest.close()
             self.manifest = None
+        if self.keys_file is not None:
+            self.keys_file.close()
+            self.keys_file = None
         if self.meta is not None:
             self.meta["frames"] = self.frames_written
             # Clear the live marker before the last write, so the review tool can offer
@@ -266,6 +332,7 @@ class ClipRecorder:
     def _save_meta(self):
         if self.directory is not None and self.meta is not None:
             self.meta["frames"] = self.frames_written
+            self.meta["keys"] = self.keys_written
             bout_session.save(self.directory, self.meta)
 
     # --- writing ---------------------------------------------------------------------
@@ -309,11 +376,14 @@ class ClipRecorder:
     def close(self):
         self._close_bout()
         self.ring.clear()
+        self.key_ring.clear()
         self.writer.close()
 
     def summary(self):
         gb = self.writer.bytes_written / BYTES_PER_GB
         note = (f"recorded {self.bouts} bout(s), {self.total_written} frames, {gb:.2f} GB")
+        if self.watch_keys:
+            note += f", {self.keys_total} key press(es)"
         if self.dropped:
             note += f" — {self.dropped} dropped (writers saturated)"
         if self.budget_hit:

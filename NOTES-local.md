@@ -58,6 +58,33 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 ## Resume here
 
+**2026-09-12 (night, later): the `1234!` check IS passable — the operator hit every beat by hand, three matches, and it passed every time. There is NO visual indicator of success ANYWHERE, which is measured, not assumed. Key recording shipped so the label can come from the keyboard instead.**
+
+**The question that was open since 09-11 is closed: a press inside the arc connects.** The operator played three matches with detection removed, hit every beat manually, and the Performance completed. So the detector's geometry was never the problem and the check is not hit-proof over Moonlight. Both of those had been open the whole time.
+
+**There is nothing in the pixels that says a beat was hit.** Eight hand-played checks from tonight (`frames/bout_20260912-212006`, `-213302`, `-214821`) against the four 09-11 checks nobody touched (`recordings_1234`), on every measurement the ring crop supports:
+
+| | hand-played, passed | untouched, 09-11 |
+|---|---|---|
+| duration | 2.87–2.91 s (two outliers 3.47, 3.83) | 2.90, 2.91, 2.89, 2.63 s |
+| arc episodes | 5–6 | 5 |
+| arc width | ~110 deg | ~110 deg |
+| terminal needle freeze | 243–300 ms | 250–276 ms |
+
+**The trap, and I fell in it for an hour: the terminal freeze is NOT a press.** Every `1234!` check ends with the needle frozen for ~250–300 ms. That reads exactly like the landing freeze an ordinary check gives, and the first eight checks I measured all had one, so "freeze = the operator's press" looked settled. The control refutes it outright: **all four of the 09-11 checks, where nobody pressed anything, freeze for 250–276 ms too.** It is how the check ends, not how a press registers. Any future "I can see the press in the frames" claim has to clear `recordings_1234` first.
+
+**The solid-fill flashes are scene content, not a zone flash.** `find_outline_arc` discards any frame with a filled band, so a success flash would be invisible to it — worth checking directly, and it is not there. Tonight's checks show fill runs up to 81 deg, but **every one of them lands 300–1400 ms AFTER the arc is gone**, and they are fire and bright props near the ring radius. During the check the max fill run is ~2 deg in both sets.
+
+**So the label cannot be recovered from the capture, and that is why `--record-keys` exists.** Because the operator hit every beat and the check passed, **every press in such a recording is a confirmed success** — ~5 labelled positive examples per check, with no inference. That is the calibration set this check has never had. `dbd/utils/key_watcher.py` is a listen-only `CGEventTap` on a background thread; `ClipRecorder.note_key` stamps presses onto the same `_t0` the frames use and writes `keys.jsonl` beside `manifest.jsonl`; `bout.json` gains `keys_watched` and `keys`.
+
+**It had to live in the armed process, and the reason is a trap already in this file.** `bout.json`'s `started` is a `strftime` string with SECOND resolution — the same second-resolution stamp that cost a wrong hypothesis on the 16:35 match. An external key log aligned through it carries up to 500 ms of error against arcs that live ~650 ms, which is not a measurement. Verified end to end against a real tap: a press injected during the lead-in lands within one frame interval of its frame (+36.6 ms at 31 ms spacing), one inside the clip lands 2.1 ms off.
+
+**Measured while building it, and NOT to be leaned on:** three presses injected through `directkeys.PressKey` all read `kCGEventSourceStateID` **0**, so the field probably does separate the bot's presses from a human's. No human press has been read back yet. The clean calibration run is `--dry-run`, where the bot presses nothing and the question does not arise. The tap created without any new permission prompt on this machine, but a fresh grant of Input Monitoring (separate from Accessibility) is the expected failure and is reported as a warning, never an exit.
+
+**The leading hypothesis for why the BOT failed, now that aim and connectivity are both ruled out: coverage.** In the 21:00 match it pressed 3 of 5 arcs and **never fired on the last one at all** — arc (31,152) was drawn for 854 ms with the needle inside it for ~362 ms, and nothing went out. The operator hit every beat and passed. If the rule is "every beat or nothing", that explains two failed matches with nothing mis-aimed. It is a hypothesis, not a finding; the keystroke log is what would confirm it.
+
+**Protocol for the calibration run:** `dbd --dry-run --record-keys` (the shell function already passes `--record`). Dry run so the only presses in `keys.jsonl` are the operator's and every one is a pass. Hit every beat. Then pair presses against arcs — **there is no reader for that yet**; `keys.jsonl` is written and nothing in the repo consumes it.
+
 **2026-09-12 (night): the `1234!` outline detection is REMOVED. Operator call after the second failed match — it still could not pass the check.** Reverted the code of `1a76e29` and `0b3544f`: `find_outline_arc`, the `Zone.outline` flag, `outline_edges` / `fired_edges`, the `OUTLINE_*` constants, the arc-retiring `mark_fired` path, `autorun.py`'s freeze-watch and cooldown suppression and its `has_fired` helper, `tools/replay_outline.py`, the outline unit tests, and `docs/testing-the-1234-check.md`. The tracker is back to what it did before 09-12: `find_zone` returns None on an unfilled arc, `decide` says `no zone drawn yet`, and the check produces a `NO PRESS` line.
 
 **No regression, and that is the whole verification.** `replay_tracker.py` gives **13/13 GREAT on `recordings` and 12 GREAT / 2 ungraded / 1 no-fire on `recordings_missed`** — identical to the documented baselines — and `recordings_1234` now scores **0 fires on 4 checks**, the pre-09-12 behaviour. `test_needle_tracker.py` passes. Note the fallback: an outline check reaches `may_react=True`, so the reactive classifier path can still press; on all four recorded `1234!` checks it never did (the four `NO PRESS` lines), so in practice this is an abstention, but it is not a *guaranteed* one.

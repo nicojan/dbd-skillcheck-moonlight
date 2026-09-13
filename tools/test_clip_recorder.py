@@ -252,6 +252,170 @@ def test_manifest_matches_the_frames_written():
         shutil.rmtree(root)
 
 
+def keys_of(root, bout=None):
+    bout = bout or bout_dirs(root)[0]
+    path = os.path.join(root, bout, "keys.jsonl")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def press(t, keycode=49):
+    return {"t": t, "keycode": keycode, "source": 1}
+
+
+def test_keys_off_by_default_writes_no_file():
+    root = tempfile.mkdtemp()
+    try:
+        clock, writer = FakeClock(), FakeWriter()
+        rec = make(root, clock, writer, pre_seconds=1.0, post_seconds=0.0)
+        feed(rec, clock, 1.0)
+        rec.trigger()
+        rec.note_key(press(clock()))
+        rec.close()
+        bout = bout_dirs(root)[0]
+        check("no keys.jsonl when not watching", keys_of(root) is None)
+        with open(os.path.join(root, bout, "bout.json")) as f:
+            meta = json.load(f)
+        # The whole point of the flag: without it, "0 presses" would read as "the
+        # operator never pressed", which is the wrong conclusion to draw from a run that
+        # was never listening.
+        check("bout says keys were not watched", meta["keys_watched"] is False)
+    finally:
+        shutil.rmtree(root)
+
+
+def test_presses_land_on_the_frame_clock():
+    """A press and a frame at the same instant must agree to the millisecond.
+
+    This is the whole reason the watcher lives in this process: an external log aligned
+    through `bout.json`'s second-resolution `started` carries up to 500 ms of error, and
+    the arcs being labelled live ~650 ms.
+    """
+
+    root = tempfile.mkdtemp()
+    try:
+        clock, writer = FakeClock(), FakeWriter()
+        rec = make(root, clock, writer, pre_seconds=1.0, post_seconds=1.0,
+                   watch_keys=True)
+        feed(rec, clock, 1.0)
+        rec.trigger()                       # opens the bout; _t0 is now
+        t0 = clock()
+        clock.advance(0.25)
+        rec.offer(frame(), clock())
+        rec.note_key(press(clock()))
+        rec.close()
+        rows = keys_of(root)
+        with open(os.path.join(root, bout_dirs(root)[0], "manifest.jsonl")) as f:
+            frames = [json.loads(line) for line in f if line.strip()]
+        last = frames[-1]["t_ms"]
+        check("one press recorded", rows is not None and len(rows) == 1,
+              f"{None if rows is None else len(rows)} rows")
+        check("press shares the frame's timestamp", rows and rows[0]["t_ms"] == last,
+              f"key {rows[0]['t_ms'] if rows else '?'} vs frame {last}")
+        check("keycode and source survive",
+              rows and rows[0]["keycode"] == 49 and rows[0]["source"] == 1)
+        check("t0 unchanged by the press", clock() > t0)
+    finally:
+        shutil.rmtree(root)
+
+
+def test_lead_in_presses_are_kept_and_stamp_negative():
+    """A press in the ring window belongs to the clip the ring is about to flush."""
+
+    root = tempfile.mkdtemp()
+    try:
+        clock, writer = FakeClock(), FakeWriter()
+        rec = make(root, clock, writer, pre_seconds=3.0, post_seconds=0.0,
+                   watch_keys=True)
+        feed(rec, clock, 1.0)
+        rec.note_key(press(clock()))        # 1 s of lead-in in, no bout open yet
+        feed(rec, clock, 1.0)
+        rec.trigger()
+        rec.close()
+        rows = keys_of(root)
+        check("lead-in press is kept", rows is not None and len(rows) == 1,
+              f"{None if rows is None else len(rows)} rows")
+        check("lead-in press stamps negative", rows and rows[0]["t_ms"] < 0,
+              f"t_ms {rows[0]['t_ms'] if rows else '?'}")
+        check("and by about the right amount",
+              rows and -1100 < rows[0]["t_ms"] < -900,
+              f"t_ms {rows[0]['t_ms'] if rows else '?'}")
+    finally:
+        shutil.rmtree(root)
+
+
+def test_presses_older_than_the_ring_are_dropped():
+    """The key buffer holds the same window as the ring, not an unbounded history."""
+
+    root = tempfile.mkdtemp()
+    try:
+        clock, writer = FakeClock(), FakeWriter()
+        rec = make(root, clock, writer, pre_seconds=1.0, post_seconds=0.0,
+                   watch_keys=True)
+        rec.note_key(press(clock()))        # far older than the ring will hold
+        feed(rec, clock, 5.0)
+        rec.trigger()
+        rec.close()
+        rows = keys_of(root)
+        check("a press older than pre_seconds is evicted", rows == [],
+              f"{rows}")
+    finally:
+        shutil.rmtree(root)
+
+
+def test_presses_between_clips_are_still_recorded():
+    """Keeping only the presses inside a clip would discard the ones around a check."""
+
+    root = tempfile.mkdtemp()
+    try:
+        clock, writer = FakeClock(), FakeWriter()
+        rec = make(root, clock, writer, pre_seconds=1.0, post_seconds=0.5,
+                   watch_keys=True)
+        feed(rec, clock, 1.0)
+        rec.trigger()
+        clock.advance(30.0)                 # long past post_seconds, bout still open
+        rec.note_key(press(clock()))
+        rec.close()
+        rows = keys_of(root)
+        check("a press outside the clip is kept", rows is not None and len(rows) == 1,
+              f"{None if rows is None else len(rows)} rows")
+        with open(os.path.join(root, bout_dirs(root)[0], "bout.json")) as f:
+            meta = json.load(f)
+        check("bout counts it", meta["keys"] == 1, f"keys={meta['keys']}")
+        check("bout says keys were watched", meta["keys_watched"] is True)
+    finally:
+        shutil.rmtree(root)
+
+
+def test_a_new_bout_starts_its_own_key_file():
+    root = tempfile.mkdtemp()
+    try:
+        clock, writer = FakeClock(), FakeWriter()
+        rec = make(root, clock, writer, pre_seconds=1.0, post_seconds=0.0,
+                   gap_seconds=10.0, watch_keys=True)
+        feed(rec, clock, 1.0)
+        rec.trigger()
+        rec.note_key(press(clock()))
+        clock.advance(60.0)                 # past the gap: next trigger rotates
+        feed(rec, clock, 1.0)
+        rec.trigger()
+        rec.note_key(press(clock()))
+        rec.close()
+        bouts = bout_dirs(root)
+        check("two bouts", len(bouts) == 2, f"{bouts}")
+        first, second = keys_of(root, bouts[0]), keys_of(root, bouts[1])
+        check("each bout has its own press", len(first or []) == 1 and len(second or []) == 1,
+              f"{len(first or [])} / {len(second or [])}")
+        # Each bout re-bases on its own _t0, so the second file must not carry the first
+        # bout's 60-second offset.
+        check("second bout re-bases its clock", second and abs(second[0]["t_ms"]) < 2000,
+              f"t_ms {second[0]['t_ms'] if second else '?'}")
+    finally:
+        shutil.rmtree(root)
+
+
 def main():
     print("clip_recorder")
     for name, fn in sorted(globals().items()):

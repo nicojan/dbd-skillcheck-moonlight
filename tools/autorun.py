@@ -39,6 +39,7 @@ from dbd.AI_model import AI_model
 from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils import link_state
 from dbd.utils.focus_watcher import FocusWatcher
+from dbd.utils.key_watcher import KeyWatcher
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.clip_recorder import (DEFAULT_GAP_SECONDS, DEFAULT_MAX_GB,
                                      DEFAULT_POST_SECONDS, DEFAULT_PRE_SECONDS,
@@ -316,6 +317,11 @@ def parse_args(argv=None):
     # `dbd --no-record` turn it back off. Same dest, later flag wins.
     p.add_argument("--no-record", dest="record", action="store_false",
                    help="do not record, overriding an earlier --record")
+    p.add_argument("--record-keys", action="store_true",
+                   help="also log the operator's SPACE presses into each bout, on the "
+                        "same clock as the frames (keys.jsonl). Needs --record and an "
+                        "Input Monitoring grant. For labelling checks the pixels cannot "
+                        "label — see dbd/utils/key_watcher.py")
     p.add_argument("--record-pre", type=float, default=DEFAULT_PRE_SECONDS,
                    help="seconds of lead-in kept before each check (ring buffer)")
     p.add_argument("--record-post", type=float, default=DEFAULT_POST_SECONDS,
@@ -326,7 +332,14 @@ def parse_args(argv=None):
     p.add_argument("--record-max-gb", type=float, default=DEFAULT_MAX_GB,
                    help="stop recording after this much on disk, so a long session "
                         "cannot fill the volume mid-match")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    # Here rather than in `run`, which reaches the recorder only after Moonlight is up and
+    # the model is loaded — a flag that turns out to be impossible should say so before the
+    # operator has streamed a game to hear it. `dbd` passes --record ahead of "$@", so this
+    # only fires on a deliberate --no-record.
+    if args.record_keys and not args.record:
+        p.error("--record-keys needs --record (it writes into the bout)")
+    return args
 
 
 def parse_aspect(text):
@@ -846,6 +859,7 @@ def run(args):
     # Recording rides on the grab the armed loop already takes — no second capture client,
     # because two of those mutually starve on macOS (NOTES-local.md, 2026-08-20).
     recorder = None
+    keys = None
     if args.record:
         if not args.wide:
             sys.exit("--record needs the wide grab; drop --no-wide")
@@ -856,10 +870,26 @@ def run(args):
             post_seconds=args.record_post,
             gap_seconds=args.record_gap,
             max_gb=args.record_max_gb,
+            watch_keys=args.record_keys,
         )
         log(f"recording: {args.record_pre:.1f}s before / {args.record_post:.1f}s after "
             f"each check, new bout after {args.record_gap:.0f}s quiet, "
             f"cap {args.record_max_gb:.0f} GB")
+
+        if args.record_keys:
+            keys = KeyWatcher()
+            if keys.start():
+                log("  keys: SPACE presses -> keys.jsonl, on the frame clock")
+                if not args.dry_run:
+                    # Worth saying out loud, because the log will look right either way.
+                    # The tap sees synthetic events, so an armed run mixes the bot's own
+                    # presses into the same file and every line stops being a label.
+                    log("  keys: ARMED — the bot's own presses land in keys.jsonl too; "
+                        "use --dry-run for a clean operator-only record")
+            else:
+                # Never fatal. A match is expensive and a missing grant is not worth one.
+                log(f"  keys: NOT recording — {keys.error}")
+                keys = None
 
     def record_check(record, path_taken):
         """Put one check in the queue, announcing a new bout when the gap rule fires."""
@@ -1029,6 +1059,12 @@ def run(args):
                     # The frame `look` just used, not a second grab. A deque append in the
                     # quiet case; encoding happens on writer threads only for kept frames.
                     recorder.offer(monitoring.last_wide, captured)
+                    if keys is not None:
+                        # Draining here rather than in the tap costs nothing: each event
+                        # carries the time the tap saw it, so a frame of lag in collecting
+                        # them does not move a single timestamp.
+                        for event in keys.drain():
+                            recorder.note_key(event)
             else:
                 frame_bgr = model.grab_screenshot()[:, :, ::-1]
                 pred, desc, probs, should_hit = predict_bgr(frame_bgr)
@@ -1219,9 +1255,18 @@ def run(args):
         if args.wide:
             log("  " + sweeps.summary())
         if recorder is not None:
+            if keys is not None:
+                # Stop the tap and take its last events BEFORE closing the bout, or the
+                # presses on the final check — the ones most likely to be the reason the
+                # match was played — land after the keys file is shut and vanish.
+                keys.stop()
+                for event in keys.drain():
+                    recorder.note_key(event)
             recorder.close()
             log(f"  {recorder.summary()} in {recorder.root}/ — "
                 f"review and prune with tools/review_recordings.py")
+            if keys is not None:
+                log(f"  {keys.summary()}")
         if check_log is not None:
             log(f"  {check_log.total} checks queued across {check_log.files} "
                 f"bout(s) in {check_log.directory}/ — "

@@ -27,6 +27,9 @@ import os
 
 BOUT_FILE = "bout.json"
 MANIFEST_FILE = "manifest.jsonl"
+# Operator key presses, stamped on the same clock as `manifest.jsonl`. Absent unless the
+# run was started with --record-keys; a bout without one is not malformed.
+KEYS_FILE = "keys.jsonl"
 WIDE_BOUT = "wide_bout"
 DISCARD_DIR = "discard"
 
@@ -84,6 +87,12 @@ def new_meta(content, geometry, started, gap_seconds, quality):
         "active": True,
         "writer_pid": os.getpid(),
         "frames": 0,
+        # `keys_watched` is what makes `keys: 0` readable: without it, a bout with no
+        # presses and a bout where nothing was listening look identical, and "the operator
+        # never hit that beat" is exactly the wrong conclusion to draw from a missing
+        # grant. See KEYS_FILE.
+        "keys_watched": False,
+        "keys": 0,
         "checks": [],
     }
 
