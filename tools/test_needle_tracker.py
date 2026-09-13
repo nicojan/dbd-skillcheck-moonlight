@@ -17,6 +17,7 @@ cannot:
 
 import os
 import sys
+from dataclasses import replace
 
 import numpy as np
 
@@ -26,7 +27,7 @@ from dbd.utils.needle_tracker import (
     AIM_BIAS_DEG, CENTRE_PRIOR, Fit, MIN_NEEDLE_STRENGTH, OUTLINE_AIM_DEG, OUTLINE_KEEP_DEG,
     OUTLINE_MAX_DEG, OUTLINE_MIN_DEG, Reading, Sample, TrackerState, ZONE_KEEP_DEG,
     Zone, aim_bias_for, decide, find_outline_arc, find_zone,
-    fit_sweep, leading_edge, lit_floor, lit_span, read_watch, score_freeze,
+    fit_sweep, leading_edge, lit_floor, lit_span, mark_fired, read_watch, score_freeze,
     strength_reference, time_to_angle, trim_frozen_tail, _longest_run,
 )
 
@@ -490,6 +491,62 @@ def test_decide_presses_only_once_the_needle_is_inside_the_outline_arc():
         d = decide(state, samples[-1].t_ms, round_trip_ms=46.0)
         check(f"past the arc, no press is scheduled at {rate:+.0f} deg/s",
               d.press_at_ms is None and "trailing edge" in d.reason, d.reason)
+
+
+def test_one_press_per_outline_arc_and_the_tracker_stays_live():
+    """A relocating-outline check is not over when a press goes out. It draws a fresh arc
+    every ~650 ms and each one is a separate opportunity, so the only thing that must never
+    happen twice is a press into the SAME arc — retired here by its trailing edge, which is
+    how `observe` identifies an arc everywhere else.
+
+    Until 2026-09-12 that invariant was held by the live loop instead, which dropped the
+    tracker and slept HIT_COOLDOWN_SECONDS behind a FREEZE_WATCH_SECONDS watch. On this
+    check the watch can only ever time out — a press that connects does not stop the
+    needle, it runs on through several more arcs — so the bot went blind for 1.30 s after
+    every press, longer than the needle's own ~1.2 s revolution. Ten fires in the
+    2026-09-12 match, every one of them "still sweeping 800 ms after the press"."""
+
+    rate = 300.0
+    samples, state = outline_state(rate, needle_now=0.0, edge_offset=-5.0)
+    now = samples[-1].t_ms
+    check("a first press is scheduled into the arc",
+          decide(state, now, round_trip_ms=46.0).press_at_ms is not None)
+
+    fired = mark_fired(state, now)
+    check("an outline fire does not close the tracker", fired.fired_at_ms is None)
+    check("...it retires the arc by its trailing edge",
+          fired.fired_edges == (state.zone.zone_end,), f"{fired.fired_edges}")
+
+    d = decide(fired, now, round_trip_ms=46.0)
+    check("the same arc is refused a second press",
+          d.press_at_ms is None and "already pressed" in d.reason, d.reason)
+    check("...and does not fall back to reacting", not d.may_react, d.reason)
+
+    # The arc relocates. A different trailing edge is a different arc, and pressable.
+    moved_samples, moved = outline_state(rate, needle_now=0.0, edge_offset=-5.0, width=100.0)
+    relocated = replace(fired, samples=moved_samples, zone=moved.zone)
+    check("the arc used for the relocation really is a different one",
+          abs((moved.zone.zone_end - state.zone.zone_end + 180.0) % 360.0 - 180.0) > 8.0)
+    d = decide(relocated, moved_samples[-1].t_ms, round_trip_ms=46.0)
+    check("a relocated arc is pressed again", d.press_at_ms is not None, d.reason)
+
+
+def test_mark_fired_still_closes_an_ordinary_check():
+    """The outline path must not weaken the one-press rule anywhere else. On a check with a
+    real Great band a second press lands outside the zone and fails a check the first had
+    already won, so `fired_at_ms` still shuts the tracker for good."""
+
+    samples = sweep_samples(320.0, start_deg=0.0, n=8)
+    now = samples[-1].t_ms
+    here = (320.0 * now / 1000.0) % 360.0
+    mid = (here + 120.0) % 360.0
+    zone = Zone(great_start=(mid - 5.0) % 360.0, great_end=(mid + 5.0) % 360.0,
+                zone_start=(mid - 5.0) % 360.0, zone_end=(mid + 44.0) % 360.0)
+    fired = mark_fired(TrackerState(samples=samples, zone=zone, centre_fixed=True), now)
+    check("an ordinary check is closed by fired_at_ms", fired.fired_at_ms == now)
+    check("...and refuses a second press",
+          decide(fired, now, round_trip_ms=46.0).reason == "already fired")
+    check("...and retires no arc", fired.fired_edges == ())
 
 
 def test_the_outline_path_leaves_ordinary_checks_alone():

@@ -123,6 +123,10 @@ OUTLINE_KEEP_DEG = 15.0     # ...and short of the trailing one. Landing error ru
                             # trailing edge than this is a press aimed at leaving the zone.
 OUTLINE_STABLE_DEG = 8.0    # how closely consecutive reads of the leading edge must agree
 OUTLINE_STABLE_FRAMES = 3   # ...and over how many, before the arc is worth aiming at
+OUTLINE_FIRED_MEMORY = 3    # arcs kept on the already-pressed list. Only ever needs to
+                            # cover the span between a press and the next arc settling —
+                            # remembering more would start refusing a genuinely new arc
+                            # that happens to relocate back onto an old position.
 # What the arc's life buys, and what it forbids. The needle needs on average half a
 # revolution — ~600 ms at 300 deg/s — to reach an arc it is not already inside, which is
 # the whole of an arc's ~650 ms. Scheduling that press anyway is what the first version of
@@ -462,6 +466,11 @@ class TrackerState:
     # reads off frames where the needle lies along the outline, and one of those is all it
     # would take to press on a check the tracker is supposed to abstain on.
     outline_edges: Tuple[float, ...] = ()
+    # Trailing edges of the outline arcs this tracker has already pressed. A relocating
+    # outline check is not over when a press goes out, so the tracker stays live across
+    # one — and this is what stops it pressing the same arc again on the next frame while
+    # the needle is still inside it. See `mark_fired`.
+    fired_edges: Tuple[float, ...] = ()
 
 
 # --- primitives ----------------------------------------------------------------------
@@ -965,6 +974,15 @@ def decide(state, now_ms, round_trip_ms=ROUND_TRIP_MS):
         return Decision(reason="no zone drawn yet", fit=fit, may_react=True)
 
     if state.zone.outline:
+        # One press per arc. The tracker stays live across an outline fire, so without this
+        # the needle — which is sitting inside the arc it was just aimed at — would satisfy
+        # the "already inside" branch again on the very next frame and go on satisfying it
+        # for the ~370 ms it takes to cross a 111 deg arc. `may_react` stays False: this is
+        # an arc already acted on, not a check with nowhere to aim.
+        if any(abs((e - state.zone.zone_end + 180.0) % 360.0 - 180.0) <= OUTLINE_STABLE_DEG
+               for e in state.fired_edges):
+            return Decision(reason="already pressed this arc", fit=fit)
+
         # The SOONEST landing inside the arc, not the best-placed one — the zone expires
         # on a ~679 ms timer, so a better-placed press that waits is a press onto nothing.
         # See
@@ -1026,7 +1044,24 @@ def mark_fired(state, t_ms):
     a safety property that depends on every caller remembering to do something is not a
     safety property. Firing twice into one check would land the second press outside the
     zone and fail a check the first press had already won.
+
+    A relocating outline check is the one exception, and it is not an exception to the
+    safety property but to what "one check" means. It draws a fresh arc every ~650 ms and
+    runs on through several of them; each arc is its own opportunity and the check does
+    not end when a press connects — the needle does not even stop. So the arc, not the
+    check, is what gets retired, identified by its TRAILING edge the same way `observe`
+    identifies one. The tracker stays live for the next arc.
+
+    That invariant used to be held by the live loop instead — drop the tracker, sleep
+    HIT_COOLDOWN_SECONDS, and before that spend FREEZE_WATCH_SECONDS watching for a freeze
+    this check can never produce. It worked, at the cost of 1.30 s blind after every press
+    against a ~1.2 s revolution, which is a whole revolution of arcs unseen. Ten fires in
+    the 2026-09-12 match, every one of them "still sweeping 800 ms after the press".
     """
+
+    if state.zone is not None and state.zone.outline:
+        edges = (state.fired_edges + (state.zone.zone_end,))[-OUTLINE_FIRED_MEMORY:]
+        return replace(state, fired_edges=edges)
 
     return replace(state, fired_at_ms=t_ms)
 

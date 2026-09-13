@@ -568,6 +568,19 @@ def summarise_landings(landings):
     return lines
 
 
+def has_fired(tracker):
+    """Whether this tracker has pressed anything at all.
+
+    There are two ways to have fired, because an outline fire deliberately leaves the
+    tracker live for the next arc: `fired_at_ms` closes an ordinary check for good, while
+    `fired_edges` retires one arc of a relocating outline check and nothing else. Reading
+    only the first would file a check the bot pressed seven times as NO PRESS — which is
+    the exact survivorship bias `no_press_note` exists to close.
+    """
+
+    return tracker.fired_at_ms is not None or bool(tracker.fired_edges)
+
+
 def no_press_note(desc, tracker, decision, tracked_ms):
     """One line explaining a check that ended without a press, or None if there is none.
 
@@ -578,7 +591,7 @@ def no_press_note(desc, tracker, decision, tracked_ms):
     off a fire that DID happen, which is a survivorship bias baked into the instrument.
     """
 
-    if tracker is None or not tracker.samples or tracker.fired_at_ms is not None:
+    if tracker is None or not tracker.samples or has_fired(tracker):
         return None
 
     reason = "never decided" if decision is None else decision.reason
@@ -616,7 +629,7 @@ def no_press_record(desc, tracker, decision, tracked_ms, context=None):
     the checks that go WORST were still throwing theirs away.
     """
 
-    if tracker is None or not tracker.samples or tracker.fired_at_ms is not None:
+    if tracker is None or not tracker.samples or has_fired(tracker):
         return None
 
     fit = None if decision is None else decision.fit
@@ -682,8 +695,20 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
     # The floor is relative to THIS check's own needle. An absolute 20 admits the stray red
     # left behind once the check clears, which scores 20-45 with a meaningless angle.
     reference = strength_reference([s.strength for s in tracker.samples])
-    deadline = pressed_at + FREEZE_WATCH_SECONDS
     readings, watch = [], read_watch(())
+
+    # A relocating outline arc never freezes, so there is nothing here to watch for. A
+    # press that connects on this check does not stop the needle — the check runs on
+    # through several more arcs — which means the watch below can only ever run to its
+    # deadline. That cost FREEZE_WATCH_SECONDS of a check whose arcs live ~650 ms, and
+    # with HIT_COOLDOWN_SECONDS behind it left the bot blind for 1.30 s after every press,
+    # against a needle revolution of ~1.2 s. See `needle_tracker.mark_fired`.
+    #
+    # The record is still written. The fire is a check the bot acted on and belongs in the
+    # queue `pull_check_stats.py` drains; it simply has no landing to report, the same way
+    # a dry run has none.
+    outline = tracker.zone.outline
+    deadline = pressed_at + (0.0 if outline else FREEZE_WATCH_SECONDS)
     while monotonic() < deadline:
         t = monotonic()
         bgr = model.grab_screenshot()[:, :, ::-1] if grab is None else grab()
@@ -741,6 +766,11 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
             entry.update(extra)
             record(entry)
         return landing
+
+    if outline:
+        log("  landing: not watched — a relocating arc never freezes, so the tracker "
+            "stays live for the next one")
+        return finish(Landing("not watched"))
 
     if watch.outcome in ("no reads", "dark"):
         log(f"  landing: needle gone before it could be read ({watch.lit} lit of "
@@ -1081,6 +1111,10 @@ def run(args):
                         continue
 
                     hits += 1
+                    # Read before `mark_fired`, which is the only thing that knows an
+                    # outline fire leaves the tracker live, and before `report_landing`
+                    # below reads the zone it was aimed at.
+                    fired_outline = (tracker.zone is not None and tracker.zone.outline)
                     tracker = mark_fired(tracker, now_ms)
                     # Age of the freshest frame the fit was built on. This is OUR share of
                     # the delay — capture plus inference — and it is the half we can fix in
@@ -1143,10 +1177,18 @@ def run(args):
                         if abs(adapted - lead_ms) >= 1.0:
                             log(f"  lead: {lead_ms:.0f} -> {adapted:.0f} ms")
                         lead_ms = adapted
-                    tracker = None
-                    sleep(HIT_COOLDOWN_SECONDS)
-                    window_start, last_capture = monotonic(), None
-                    frames = 0
+                    if fired_outline:
+                        # Stay on the check. The next arc is ~650 ms away, the tracker
+                        # already has its centre fixed and a full sample window, and
+                        # `mark_fired` has retired the arc just pressed so it cannot be
+                        # pressed again. Dropping it here and sleeping the cooldown is
+                        # what cost a whole revolution of arcs after every press.
+                        last_capture = None     # the fire is a gap, not a frame interval
+                    else:
+                        tracker = None
+                        sleep(HIT_COOLDOWN_SECONDS)
+                        window_start, last_capture = monotonic(), None
+                        frames = 0
 
                 # A fitted check with nowhere to aim (no Great band drawn, or the band
                 # already passed) is exactly the reactive case: pressing on the model's
