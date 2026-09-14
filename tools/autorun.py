@@ -39,7 +39,7 @@ from dbd.AI_model import AI_model
 from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils import link_state
 from dbd.utils.focus_watcher import FocusWatcher
-from dbd.utils.key_watcher import KeyWatcher
+from dbd.utils.key_watcher import ABILITY_KEYCODE, SPACE_KEYCODE, KeyWatcher
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.clip_recorder import (DEFAULT_GAP_SECONDS, DEFAULT_MAX_GB,
                                      DEFAULT_POST_SECONDS, DEFAULT_PRE_SECONDS,
@@ -877,9 +877,12 @@ def run(args):
             f"cap {args.record_max_gb:.0f} GB")
 
         if args.record_keys:
-            keys = KeyWatcher()
+            # Two keycodes and no more. `keycodes=None` would record the whole keyboard,
+            # which is far more of the operator's typing than `--record-keys` asks for.
+            keys = KeyWatcher(keycodes=(SPACE_KEYCODE, ABILITY_KEYCODE))
             if keys.start():
-                log("  keys: SPACE presses -> keys.jsonl, on the frame clock")
+                log("  keys: SPACE + Active Ability presses -> keys.jsonl, "
+                    "on the frame clock")
                 if not args.dry_run:
                     # Worth saying out loud, because the log will look right either way.
                     # The tap sees synthetic events, so an armed run mixes the bot's own

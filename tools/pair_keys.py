@@ -40,6 +40,7 @@ from dbd.utils.needle_tracker import (
     WINDOW_IN, WINDOW_OUT, ZONE_THICK_PX, Zone, _close_gaps, _longest_run, _max_contiguous,
     fit_sweep, needle_angle, refine_centre, sample_rays, static_image,
 )
+from dbd.utils.key_watcher import ABILITY_KEYCODE, SPACE_KEYCODE
 from dbd.utils.wide_capture import centre_slice, geometry_from_describe
 
 # Recovered from 8a1c62d^ alongside find_outline_arc. The measurements behind them are in
@@ -272,13 +273,42 @@ def bursts(presses, gap_ms):
     return out
 
 
-def describe_burst(burst, index):
+def describe_burst(burst, index, start_ms=None):
+    """One burst, and its offset from the Performance start when there is one.
+
+    `start_ms` is the Active Ability press. The operator starts every Performance by hand,
+    so that press is a real `t0` on the frame clock rather than an inferred one, and beat
+    offsets measured from it are the thing a beat grid would have to predict.
+    """
+
     gaps = [b["t_ms"] - a["t_ms"] for a, b in zip(burst, burst[1:])]
     sources = sorted({p["source"] for p in burst})
     tag = "operator" if sources == [1] else ("BOT" if sources == [0] else f"mixed {sources}")
-    return (f"burst {index}: {len(burst)} presses over "
-            f"{burst[-1]['t_ms'] - burst[0]['t_ms']:.0f} ms  [{tag}]\n"
-            f"  intervals: {'  '.join(f'{g:.0f}' for g in gaps) or 'single press'} ms")
+    head = (f"burst {index}: {len(burst)} beats over "
+            f"{burst[-1]['t_ms'] - burst[0]['t_ms']:.0f} ms  [{tag}]")
+    if start_ms is not None:
+        head += (f"\n  Performance started (Active Ability) at {start_ms:.0f} ms; "
+                 f"first beat +{burst[0]['t_ms'] - start_ms:.0f} ms")
+    return head + f"\n  intervals: {'  '.join(f'{g:.0f}' for g in gaps) or 'single beat'} ms"
+
+
+def performance_start(starts, burst, reach_ms=16000.0):
+    """The Active Ability press this burst belongs to, or None.
+
+    Bounded by `reach_ms` rather than taken as "the most recent one ever", because a start
+    far behind the burst is a DIFFERENT Performance and pairing to it invents a `t0` that
+    never happened. 16 s is deliberately generous: a Performance runs up to 15 s and a
+    Performance is MANY bursts, not one — in `bout_20260913-130005` the second burst begins
+    9.4 s after the start and is plainly the same run. The cool-down is 90-110 s, so the
+    next real start cannot arrive for another minute and a half and there is nothing for a
+    wide window to collide with.
+
+    A first pass used 6000 ms and orphaned exactly that second burst. The unit tests all
+    passed; the end-to-end run against a real bout is what showed it.
+    """
+
+    before = [s for s in starts if 0.0 <= burst[0]["t_ms"] - s["t_ms"] <= reach_ms]
+    return before[-1]["t_ms"] if before else None
 
 
 def parse_args():
@@ -303,17 +333,28 @@ def main():
         raise SystemExit(f"{args.bout}: no frames in manifest.jsonl")
 
     spacing = float(np.median(np.diff([r["t_ms"] for r in records])))
-    kept = [p for p in presses if args.bot_presses or p["source"] != 0]
-    dropped = len(presses) - len(kept)
+    human = [p for p in presses if args.bot_presses or p["source"] != 0]
+    dropped = len(presses) - len(human)
+
+    # The Active Ability press STARTS the Performance and is not a beat. Scoring it as one
+    # would put a press ~3 s before the first arc exists and report it as a miss.
+    starts = [p for p in human if p.get("keycode") == ABILITY_KEYCODE]
+    kept = [p for p in human if p.get("keycode", SPACE_KEYCODE) != ABILITY_KEYCODE]
 
     print(f"{args.bout}")
     print(f"  {len(records)} frames at {spacing:.1f} ms spacing, "
           f"t {records[0]['t_ms']:.0f} to {records[-1]['t_ms']:.0f} ms")
-    print(f"  {len(presses)} presses"
-          + (f", {dropped} source-0 (bot) presses excluded" if dropped else ""))
-    print(f"  checks logged by the bout: {len(meta.get('checks', []))}\n")
+    print(f"  {len(presses)} presses: {len(kept)} beats, "
+          f"{len(starts)} Performance starts"
+          + (f", {dropped} source-0 (bot) excluded" if dropped else ""))
+    print(f"  checks logged by the bout: {len(meta.get('checks', []))}")
+    if not starts:
+        print("  NOTE: no Active Ability press in this bout — either it predates the "
+              "two-keycode watcher, or the start fell outside the clip window, or the "
+              "in-game binding no longer matches ABILITY_KEYCODE")
+    print()
     for i, burst in enumerate(bursts(kept, args.gap_ms), 1):
-        print(describe_burst(burst, i))
+        print(describe_burst(burst, i, performance_start(starts, burst)))
 
     images = read_frames(args.bout, geometry, records)
     # The centre is refined over the whole bout: it is the ring's place in a FIXED grab, so

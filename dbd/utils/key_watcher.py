@@ -41,6 +41,17 @@ from time import monotonic
 
 SPACE_KEYCODE = 49
 
+# The Active Ability button, which is what STARTS a `1-2-3-4!` Performance. The operator
+# starts one manually every time (confirmed 2026-09-13), so this press is the only cue in
+# the project that can be anticipated rather than detected: it puts an exact `t0` for the
+# Performance on the same clock as the frames, ~3 s before the first beat is due.
+#
+# 3 is `kVK_ANSI_F`, and it is THIS OPERATOR'S BINDING rather than a game default — DBD
+# ships Active Ability Button 2 on Ctrl. Rebinding the key in-game and not here is the
+# failure mode, and it is silent: the tap keeps working, `keys.jsonl` keeps filling with
+# SPACE, and only the Performance anchor quietly stops appearing.
+ABILITY_KEYCODE = 3
+
 # Quartz hands a disabled tap back to its own callback rather than raising. Both reasons
 # are recoverable by re-enabling, and a tap that silently stops is indistinguishable from
 # an operator who stopped pressing — which would read as "the beat was never hit".
