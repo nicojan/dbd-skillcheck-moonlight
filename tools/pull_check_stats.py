@@ -62,11 +62,19 @@ def summarise(records):
     verdicts = Counter(r["verdict"] for r in graded)
     trips = [r["round_trip_ms"] for r in records
              if isinstance(r.get("round_trip_ms"), (int, float))]
-    return paths, verdicts, graded, trips
+    # Split the reactive presses by whether grading was ever POSSIBLE. `wiggle` oscillates
+    # rather than sweeping, so the tracker stands down on it by construction, there is no
+    # zone and no fit, and `report_landing` returns immediately. Calling those "ungraded"
+    # alongside a fitted check that simply went unwatched overstates the hole by ~85x —
+    # over the whole archive it is 845 wiggle against 10 everything else — and wiggle has
+    # separately been MEASURED and found fine (10 of 10 inside its 32 deg band).
+    reactive = [r for r in records if r.get("path") == "reactive"]
+    wiggle = [r for r in reactive if str(r.get("desc", "")).startswith("wiggle")]
+    return paths, verdicts, graded, trips, len(wiggle), len(reactive) - len(wiggle)
 
 
 def bout_line(name, records):
-    paths, verdicts, graded, trips = summarise(records)
+    paths, verdicts, graded, trips, _wiggle, _aimed = summarise(records)
     rate = ("%4.0f%%" % (100.0 * verdicts["GREAT"] / len(graded))) if graded else "   --"
     return ("  %-30s %3d checks %3d/%2d/%2d   %4dG %4dg %3dM   Great %s  trip %s"
             % (name, len(records), paths["predictive"], paths["reactive"],
@@ -83,7 +91,7 @@ def main(argv):
         return 0
 
     every = [r for _, records in files for r in records]
-    paths, verdicts, graded, trips = summarise(every)
+    paths, verdicts, graded, trips, wiggle, aimed = summarise(every)
 
     print("%d skill checks across %d bout(s)\n" % (len(every), len(files)))
     print("=== per bout (a bout is checks with no minute-long gap in them) ===")
@@ -122,12 +130,22 @@ def main(argv):
 
     # Reactive presses are counted but never graded: nothing watches where they land, so
     # a reader that treats them as hits is inventing a result. Say so rather than let the
-    # Great percentage above be read as covering every check.
-    if paths["reactive"]:
-        print("  note:       the %d reactive press(es) are UNGRADED — the freeze watch "
-              "does not run on them," % paths["reactive"])
-        print("              so nothing knows where they landed. They are in the check "
-              "count, not the Great rate.")
+    # Great percentage above be read as covering every check — but say WHICH kind, because
+    # the two are not the same problem and reporting one number invited exactly one wrong
+    # conclusion on 2026-09-13 ("36% of every press is unmeasured", which read as a hole
+    # worth building a freeze watch for and is almost entirely wiggle).
+    if wiggle:
+        print("  reactive:   %d wiggle press(es) — ungradeable BY CONSTRUCTION, not a gap. "
+              "Wiggle oscillates," % wiggle)
+        print("              so the tracker stands down and there is no zone to score "
+              "against. Measured separately")
+        print("              and fine: 10 of 10 inside its 32 deg band, median margin "
+              "+12.5 deg.")
+    if aimed:
+        print("  reactive:   %d fitted press(es) went UNWATCHED — these are the real gap. "
+              "A zone existed" % aimed)
+        print("              and nothing read where the needle stopped. They are in the "
+              "check count, not the Great rate.")
     if trips:
         print("  round trip: median %.0f ms over %d measured" % (median(trips), len(trips)))
 
