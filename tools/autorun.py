@@ -40,6 +40,36 @@ from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils import link_state
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.key_watcher import ABILITY_KEYCODE, SPACE_KEYCODE, KeyWatcher
+
+# How long the reactive path stands down after an Active Ability press. A `1-2-3-4!`
+# Performance runs up to 15 s (the perk's own wording) and the operator plays every beat of
+# it by hand, so a bot press in that window can only ever spoil one: a missed check cancels
+# the whole Performance, and the arcs are ~110 deg with the needle inside for ~367 ms, so
+# there is no aim problem for the bot to help with. 16 s is the 15 plus a frame's grace.
+#
+# This is a STAND-DOWN, not a detector. Nothing here reads the check; it keys off the
+# operator's own keypress, which is the only signal about this check that has ever been
+# reliable — see NOTES-local.md, "no visual indicator of success anywhere".
+PERFORMANCE_SECONDS = 16.0
+
+
+def performance_deadline(events, current=0.0, seconds=PERFORMANCE_SECONDS):
+    """The stand-down deadline after these drained key events, as a new value.
+
+    Takes the LATEST deadline rather than the last event's, so a second Active Ability
+    press cannot shorten a hold that is already running — which matters because the press
+    that starts a Performance and a press that fails to (on cool-down, or not idle) look
+    identical from a key tap. Erring long costs at most a few reactive presses the bot was
+    never good at anyway; erring short costs the Performance.
+
+    Not filtered on `source`: the bot never sends this key today, and if it ever learns to,
+    that press still starts a Performance and standing down is still right.
+    """
+
+    for event in events:
+        if event["keycode"] == ABILITY_KEYCODE:
+            current = max(current, event["t"] + seconds)
+    return current
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.clip_recorder import (DEFAULT_GAP_SECONDS, DEFAULT_MAX_GB,
                                      DEFAULT_POST_SECONDS, DEFAULT_PRE_SECONDS,
@@ -876,23 +906,32 @@ def run(args):
             f"each check, new bout after {args.record_gap:.0f}s quiet, "
             f"cap {args.record_max_gb:.0f} GB")
 
+
+    # The key tap is NOT a recording feature, which is why it is out here rather than
+    # under `--record`. The operator plays every `1-2-3-4!` Performance by hand, so the
+    # Active Ability press is how the bot knows to keep its hands off for the next
+    # PERFORMANCE_SECONDS. `--record-keys` only decides whether the presses are also
+    # WRITTEN to the bout; the guard runs either way.
+    keys = KeyWatcher(keycodes=(SPACE_KEYCODE, ABILITY_KEYCODE))
+    if keys.start():
+        log(f"  keys: watching SPACE + Active Ability; the reactive path stands down for "
+            f"{PERFORMANCE_SECONDS:.0f}s after an Active Ability press")
         if args.record_keys:
-            # Two keycodes and no more. `keycodes=None` would record the whole keyboard,
-            # which is far more of the operator's typing than `--record-keys` asks for.
-            keys = KeyWatcher(keycodes=(SPACE_KEYCODE, ABILITY_KEYCODE))
-            if keys.start():
-                log("  keys: SPACE + Active Ability presses -> keys.jsonl, "
-                    "on the frame clock")
-                if not args.dry_run:
-                    # Worth saying out loud, because the log will look right either way.
-                    # The tap sees synthetic events, so an armed run mixes the bot's own
-                    # presses into the same file and every line stops being a label.
-                    log("  keys: ARMED — the bot's own presses land in keys.jsonl too; "
-                        "use --dry-run for a clean operator-only record")
-            else:
-                # Never fatal. A match is expensive and a missing grant is not worth one.
-                log(f"  keys: NOT recording — {keys.error}")
-                keys = None
+            log("  keys: also writing keys.jsonl, on the frame clock")
+            if not args.dry_run:
+                # Worth saying out loud, because the log will look right either way. The
+                # tap sees synthetic events, so an armed run mixes the bot's own presses
+                # into the same file and every line stops being a label.
+                log("  keys: ARMED — the bot's own presses land in keys.jsonl too; "
+                    "use --dry-run for a clean operator-only record")
+    else:
+        # Never fatal — a match is expensive and a missing grant is not worth one. But it
+        # must be LOUD, because a guard that silently does nothing is worse than no guard:
+        # the run looks identical right up until the bot stomps a beat.
+        log(f"  keys: NO TAP — {keys.error}")
+        log("  keys: PERFORMANCE GUARD IS OFF — the bot may press during a 1-2-3-4! "
+            "Performance. Grant Input Monitoring, or play Performances with the bot paused.")
+        keys = None
 
     def record_check(record, path_taken):
         """Put one check in the queue, announcing a new bout when the gap rule fires."""
@@ -918,6 +957,9 @@ def run(args):
     active = False
     frames = 0
     hits = 0
+    performance_until = 0.0   # monotonic deadline; the reactive path holds off until then
+    stood_down = 0            # presses withheld inside a Performance
+    last_stand_down = 0.0     # rate-limits the STAND DOWN line to one a second
     landings = []          # one Landing per predictive fire; summarised at exit
     window_start = monotonic()
     seen_frontmost = None
@@ -1062,16 +1104,26 @@ def run(args):
                     # The frame `look` just used, not a second grab. A deque append in the
                     # quiet case; encoding happens on writer threads only for kept frames.
                     recorder.offer(monitoring.last_wide, captured)
-                    if keys is not None:
-                        # Draining here rather than in the tap costs nothing: each event
-                        # carries the time the tap saw it, so a frame of lag in collecting
-                        # them does not move a single timestamp.
-                        for event in keys.drain():
-                            recorder.note_key(event)
             else:
                 frame_bgr = model.grab_screenshot()[:, :, ::-1]
                 pred, desc, probs, should_hit = predict_bgr(frame_bgr)
             frames += 1
+
+            if keys is not None:
+                # Draining here rather than in the tap costs nothing: each event carries
+                # the time the tap saw it, so a frame of lag in collecting them does not
+                # move a single timestamp. Unconditional, because the Performance guard
+                # needs these whether or not a recorder is writing them down.
+                drained = keys.drain()
+                if recorder is not None:
+                    for event in drained:
+                        recorder.note_key(event)
+                started = performance_deadline(drained, performance_until)
+                if started > performance_until:
+                    performance_until = started
+                    log(f"PERFORMANCE: Active Ability pressed — reactive path stands "
+                        f"down for {PERFORMANCE_SECONDS:.0f}s; the operator plays "
+                        f"1-2-3-4! by hand")
 
             if last_capture is not None:
                 dt = (captured - last_capture) * 1000.0
@@ -1177,6 +1229,18 @@ def run(args):
                 # A fitted check with nowhere to aim (no Great band drawn, or the band
                 # already passed) is exactly the reactive case: pressing on the model's
                 # cue lands in Good, which beats not pressing at all.
+                # Ordered before the reactive branch on purpose: this one wins.
+                elif should_hit and decision.may_react and captured < performance_until:
+                    stood_down += 1
+                    if captured - last_stand_down > 1.0:
+                        # Rate-limited rather than sleeping. A sleep here would be the
+                        # 2026-09-12 bug again: HIT_COOLDOWN_SECONDS blinded the loop for
+                        # longer than a needle revolution. The check is left to the tracker
+                        # so it still files its own NO PRESS line; only the press is held.
+                        log(f"STAND DOWN: {desc} — 1-2-3-4! Performance, "
+                            f"{performance_until - captured:.1f}s left")
+                        last_stand_down = captured
+
                 elif should_hit and decision.may_react:
                     hits += 1
                     fire(args, 0.0)
@@ -1257,6 +1321,9 @@ def run(args):
                     f"{'' if args.seed_lead else ' (enable with --seed-lead)'}")
         if args.wide:
             log("  " + sweeps.summary())
+        # The tap is stopped on exactly one of these paths and its summary logged once.
+        # An earlier version nulled `keys` after stopping it, which silently dropped the
+        # summary on every recorded run — the one path that always has a tap.
         if recorder is not None:
             if keys is not None:
                 # Stop the tap and take its last events BEFORE closing the bout, or the
@@ -1268,8 +1335,13 @@ def run(args):
             recorder.close()
             log(f"  {recorder.summary()} in {recorder.root}/ — "
                 f"review and prune with tools/review_recordings.py")
-            if keys is not None:
-                log(f"  {keys.summary()}")
+        elif keys is not None:
+            keys.stop()
+        if keys is not None:
+            log(f"  {keys.summary()}")
+        if stood_down:
+            log(f"  performance guard: {stood_down} reactive press(es) withheld inside a "
+                f"1-2-3-4! Performance")
         if check_log is not None:
             log(f"  {check_log.total} checks queued across {check_log.files} "
                 f"bout(s) in {check_log.directory}/ — "
