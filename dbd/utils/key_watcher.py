@@ -52,6 +52,18 @@ SPACE_KEYCODE = 49
 # SPACE, and only the Performance anchor quietly stops appearing.
 ABILITY_KEYCODE = 3
 
+# The operator's arm/disarm toggle. 51 is `kVK_Delete` — the BACKSPACE key, not the forward
+# delete above the arrows (that is 117, `kVK_ForwardDelete`). Chosen because DBD binds
+# nothing to it, so a press inside the game is inert and costs no action.
+#
+# It is inert only INSIDE the game. This tap is listen-only — it never swallows an event —
+# so a backspace typed anywhere else still deletes a character in whatever has focus, and
+# would silently flip the bot's state at the same time. That is the whole reason
+# `autorun.py` honours this key only while the game window is frontmost; a toggle you
+# cannot see and did not mean is worse than no toggle, because the run looks identical
+# right up until the bot fails to press.
+TOGGLE_KEYCODE = 51
+
 # Quartz hands a disabled tap back to its own callback rather than raising. Both reasons
 # are recoverable by re-enabling, and a tap that silently stops is indistinguishable from
 # an operator who stopped pressing — which would read as "the beat was never hit".

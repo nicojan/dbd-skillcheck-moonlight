@@ -40,7 +40,8 @@ from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils import link_state
 from dbd.utils.load_tally import LoadTally
 from dbd.utils.focus_watcher import FocusWatcher
-from dbd.utils.key_watcher import ABILITY_KEYCODE, SPACE_KEYCODE, KeyWatcher
+from dbd.utils.key_watcher import (ABILITY_KEYCODE, SPACE_KEYCODE, TOGGLE_KEYCODE,
+                                   KeyWatcher)
 
 # How long the reactive path stands down after an Active Ability press. A `1-2-3-4!`
 # Performance runs up to 15 s (the perk's own wording) and the operator plays every beat of
@@ -71,6 +72,27 @@ def performance_deadline(events, current=0.0, seconds=PERFORMANCE_SECONDS):
         if event["keycode"] == ABILITY_KEYCODE:
             current = max(current, event["t"] + seconds)
     return current
+
+
+def toggle_armed(events, armed):
+    """Fold the operator's toggle presses over the current armed state. Returns a bool.
+
+    One press, one flip — so a double-tap comes back where it started, and it does not
+    matter whether the two presses land in the same drain or a hundred frames apart.
+
+    NOT filtered on `source`. The bot never sends this key, and if some future path did,
+    a bot that can disarm itself is a bug worth seeing in the log rather than one this
+    function quietly hides.
+
+    The caller compares the return against what it passed in to decide whether to say
+    anything. That is deliberate: a state change nobody announced is exactly the failure
+    this toggle could introduce, and it must never depend on the fold noticing it.
+    """
+
+    for event in events:
+        if event["keycode"] == TOGGLE_KEYCODE:
+            armed = not armed
+    return armed
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.clip_recorder import (DEFAULT_GAP_SECONDS, DEFAULT_MAX_GB,
                                      DEFAULT_POST_SECONDS, DEFAULT_PRE_SECONDS,
@@ -949,10 +971,12 @@ def run(args):
     # Active Ability press is how the bot knows to keep its hands off for the next
     # PERFORMANCE_SECONDS. `--record-keys` only decides whether the presses are also
     # WRITTEN to the bout; the guard runs either way.
-    keys = KeyWatcher(keycodes=(SPACE_KEYCODE, ABILITY_KEYCODE))
+    keys = KeyWatcher(keycodes=(SPACE_KEYCODE, ABILITY_KEYCODE, TOGGLE_KEYCODE))
     if keys.start():
         log(f"  keys: watching SPACE + Active Ability; the reactive path stands down for "
             f"{PERFORMANCE_SECONDS:.0f}s after an Active Ability press")
+        log("  keys: BACKSPACE disarms and re-arms the bot — no presses while disarmed, "
+            "but frames keep recording. Only while the game window is frontmost.")
         if args.record_keys:
             log("  keys: also writing keys.jsonl, on the frame clock")
             if not args.dry_run:
@@ -968,6 +992,8 @@ def run(args):
         log(f"  keys: NO TAP — {keys.error}")
         log("  keys: PERFORMANCE GUARD IS OFF — the bot may press during a 1-2-3-4! "
             "Performance. Grant Input Monitoring, or play Performances with the bot paused.")
+        log("  keys: THE BACKSPACE TOGGLE IS OFF TOO — the only way to stand the bot "
+            "down is to take focus off the game window, or ctrl-c.")
         keys = None
 
     def record_check(record, path_taken):
@@ -997,6 +1023,9 @@ def run(args):
     performance_until = 0.0   # monotonic deadline; the reactive path holds off until then
     stood_down = 0            # presses withheld inside a Performance
     last_stand_down = 0.0     # rate-limits the STAND DOWN line to one a second
+    armed = True              # BACKSPACE flips this; see toggle_armed
+    held_checks = 0           # checks that came and went with the bot disarmed
+    hold_hot_until = None     # keeps the recorder writing through a disarmed check
     landings = []          # one Landing per predictive fire; summarised at exit
     window_start = monotonic()
     seen_frontmost = None
@@ -1111,6 +1140,17 @@ def run(args):
                 window_start = monotonic()
 
             if not active:
+                if keys is not None:
+                    # Drained and DROPPED. A key pressed while another app is frontmost
+                    # was typed into that app, not at the game, and the deque does not
+                    # forget: without this the events sit there and fire the instant
+                    # focus comes back. That is not hypothetical — the 2026-09-13 22:09
+                    # log shows a Performance hold starting one second after RESUMED,
+                    # off an `f` pressed in a terminal. For BACKSPACE the same bug would
+                    # be worse than a spurious hold: every backspace typed while writing
+                    # a message would flip the bot, and the flip would land silently at
+                    # the moment the operator tabbed back into a match.
+                    keys.drain()
                 sleep(IDLE_POLL_SECONDS)
                 continue
 
@@ -1172,11 +1212,62 @@ def run(args):
                         f"down for {PERFORMANCE_SECONDS:.0f}s; the operator plays "
                         f"1-2-3-4! by hand")
 
+                flipped = toggle_armed(drained, armed)
+                if flipped != armed:
+                    armed = flipped
+                    # Loud, and on its own line. The whole risk of this feature is a run
+                    # that is silently doing nothing, so the state change is the one
+                    # thing that must never be inferred from the absence of FIRE lines.
+                    log("ARMED — backspace; the bot has the keyboard again" if armed else
+                        "DISARMED — backspace; no presses, no landings, no queued checks. "
+                        "Frames keep recording. Backspace again to re-arm.")
+                    if not armed:
+                        # A live track belongs to a check the operator now owns. Dropped
+                        # silently rather than through `stand_down`, which would file a
+                        # `no press` record — and a check nobody was trying to press is
+                        # not a check the bot dropped.
+                        tracker, track_t0 = None, None
+
             if last_capture is not None:
                 dt = (captured - last_capture) * 1000.0
                 if dt < 200.0:  # ignore the gap across a pause or a cooldown
                     frame_ms = FRAME_MS_DECAY * frame_ms + (1 - FRAME_MS_DECAY) * dt
             last_capture = captured
+
+            # --- disarmed: the operator has the keyboard ---------------------------
+            # Everything ABOVE this line still runs — the classifier reads every frame,
+            # the recorder's ring keeps filling, the load tally keeps sampling — and
+            # everything below it does not: no press, no freeze watch, no landing row,
+            # no queued check. A check played by hand is not a check the bot acted on,
+            # and putting it in the same files would poison every stats tool in the repo.
+            #
+            # Frames are the deliberate exception. A hand-played Merciless Storm is
+            # exactly the footage this project has never had, and the ring holds only
+            # `pre_seconds`, so the recorder has to be told a check is happening or the
+            # clip is gone by the time the storm ends.
+            if not armed:
+                on_check = should_hit or pred in TRACKED_PREDS
+                if not on_check:
+                    hold_hot_until = None
+                elif recorder is not None:
+                    if hold_hot_until is None:
+                        # The record goes on the leading edge ONLY. `trigger` appends it
+                        # to the bout's meta every time it is handed one, and a 20 s
+                        # storm at 38 fps would write 700 identical rows into bout.json.
+                        recorder.trigger({"at": strftime("%H:%M:%S"), "desc": desc,
+                                          "path": "disarmed"})
+                        held_checks += 1
+                        hold_hot_until = captured + 1.0
+                    elif captured >= hold_hot_until:
+                        # Bare re-trigger: no meta row, just flush and stay hot. Every
+                        # 1.0 s against a 1.5 s `post_seconds`, so the coverage of a long
+                        # continuous check has no holes in it.
+                        recorder.trigger()
+                        hold_hot_until = captured + 1.0
+                elif hold_hot_until is None:
+                    held_checks += 1
+                    hold_hot_until = captured + 1.0
+                continue
 
             # --- predictive path: sweeping checks ----------------------------------
             if args.predict and pred in TRACKED_PREDS:
@@ -1400,6 +1491,15 @@ def run(args):
         if stood_down:
             log(f"  performance guard: {stood_down} reactive press(es) withheld inside a "
                 f"1-2-3-4! Performance")
+        if held_checks or not armed:
+            # Said whenever it happened at all, and again if the run ENDED disarmed —
+            # because a match that ends with the toggle off produces a landings file
+            # that is short for a reason no other line in this log would give.
+            # `held_checks` counts EPISODES, not checks: a continuous storm the classifier
+            # loses for a frame reads as two. Close enough to answer "did anything happen
+            # while I had the keyboard", which is all this line is for.
+            log(f"  backspace toggle: ~{held_checks} check episode(s) passed with the bot "
+                f"disarmed; the run ended {'DISARMED' if not armed else 'armed'}")
         if check_log is not None:
             log(f"  {check_log.total} checks queued across {check_log.files} "
                 f"bout(s) in {check_log.directory}/ — "
