@@ -237,6 +237,50 @@ def test_the_summary_reports_what_it_could_not_measure():
           "median 96 ms" in text and "n=3" in text, text)
 
 
+def test_a_miss_on_an_unmeasured_zone_is_counted_apart():
+    """The 2026-09-13 18:08:22 shape, and why the two tools disagreed about it.
+
+    That fire was a `repair-heal` whose zone read collapsed to `great == zone`, 9 deg wide
+    against the ~50 deg the check actually draws. Two things followed, neither of them a
+    bad press: `aim_bias_for` saw no room behind the aim and returned 0.0, and the grader
+    correctly refused to call a Great it had never measured — so a landing 16 deg past a
+    9 deg zone scored MISS. `rescore_policy.py` has always dropped records like this from
+    the pool, but the armed log counted them, so the session reported `MISS 2` for a night
+    the policy tool scores as one real miss. The split has to be VISIBLE rather than
+    silent: the press did land outside the zone as drawn, and hiding it would be the
+    opposite error.
+    """
+
+    import autorun
+    L = autorun.Landing
+
+    landings = [
+        L("measured", round_trip_ms=40.0, verdict="GREAT", error_deg=2.0, great_measured=True),
+        L("measured", round_trip_ms=45.0, verdict="MISS", error_deg=-8.5, great_measured=True),
+        L("measured", round_trip_ms=73.0, verdict="MISS", error_deg=11.5, great_measured=False),
+    ]
+    text = "\n".join(autorun.summarise_landings(landings))
+
+    check("both misses still appear in the headline tally", "MISS 2" in text, text)
+    check("and the unmeasured-zone one is called out", "1 landed against a zone with NO "
+          "Great band measured" in text, text)
+    check("named as a failed read, not a mis-aimed press",
+          "failed zone read" in text, text)
+    check("and it points at the tool that excludes them",
+          "rescore_policy.py" in text, text)
+
+    clean = [L("measured", round_trip_ms=45.0, verdict="MISS", error_deg=-8.5,
+               great_measured=True)]
+    check("a run whose misses are all real says nothing extra",
+          "NO Great band" not in "\n".join(autorun.summarise_landings(clean)))
+
+    # Records written before 2026-09-13 carry no flag at all. Unknown must not be read as
+    # False, or every historic miss would be re-labelled a failed read.
+    old = [L("measured", round_trip_ms=45.0, verdict="MISS", error_deg=-8.5)]
+    check("a pre-2026-09-13 record with no flag is left alone",
+          "NO Great band" not in "\n".join(autorun.summarise_landings(old)))
+
+
 def test_freeze_onset_agrees_with_freeze_angle():
     # The two must never disagree: a settled angle with no onset (or the reverse) would
     # print a round trip for a landing that was refused, or refuse one we had timed.

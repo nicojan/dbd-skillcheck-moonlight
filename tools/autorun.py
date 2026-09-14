@@ -442,6 +442,12 @@ class Landing:
     round_trip_ms: Optional[float] = None
     verdict: Optional[str] = None
     error_deg: Optional[float] = None
+    # Was a Great band actually FOUND on this check, or was the whole zone lit? A MISS
+    # against a drawn band and a MISS against a zone we never measured are different
+    # objects, and `rescore_policy.py` has always excluded the second from the pool. The
+    # run's own summary counted them together, so the armed log and the policy tool
+    # disagreed about how many misses a session took. See `summarise_landings`.
+    great_measured: Optional[bool] = None
 
 
 def plausible_round_trip(round_trip_ms, fit):
@@ -596,6 +602,20 @@ def summarise_landings(landings):
                       if verdicts.count(v))
     lines = [f"landings: {len(verdicts)} of {len(landings)} fires scored"
              + (f" — {tally}" if tally else "")]
+
+    # A MISS taken against a zone whose Great band was never measured is not the same
+    # object as a MISS against a drawn band, and `rescore_policy.py` has always dropped
+    # the first from its pool. Counting them together is how the armed log came to report
+    # `MISS 2` for a session the policy tool scores as one — on 2026-09-13 the second was
+    # a `repair-heal` whose zone read collapsed to 9 deg, which is a failed read rather
+    # than a bad press. Called out rather than silently excluded: the press really did
+    # land outside the zone as drawn, and hiding that would be the opposite error.
+    blind = sum(1 for l in landings
+                if l.verdict == "MISS" and l.great_measured is False)
+    if blind:
+        lines.append(f"  of those MISSes, {blind} landed against a zone with NO Great band "
+                     f"measured — a failed zone read, not a mis-aimed press; "
+                     f"rescore_policy.py excludes these")
 
     if trips:
         lines.append(f"  round trip: median {median(trips):.0f} ms, {min(trips):.0f}-"
@@ -795,13 +815,23 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
 
     settled = watch.angle
     verdict, err = score_freeze(tracker.zone, settled)
+    graded_zone = tracker.zone.great_measured
     log(f"  landed {settled:.1f} deg — {verdict}"
         + (f", {err:+.1f} deg from Great centre" if err is not None else ""))
+    if not graded_zone:
+        # Loud, because every number on the line above is measured against a zone that was
+        # never resolved into a band, and nothing else in the log says so. On `full white`
+        # this is the expected and correct state; on a `repair-heal` it means the zone read
+        # collapsed, which also zeroed `aim_bias_for` and aimed this press ~3 deg EARLY.
+        log(f"  zone: no Great band measured — {tracker.zone.great_width:.0f} deg great in a "
+            f"{tracker.zone.zone_width:.0f} deg zone. Expected on full white/black; on a "
+            f"drawn check it is a FAILED ZONE READ and the aim bias was zeroed.")
 
     press_ms = (pressed_at - track_t0) * 1000.0
     measured = time_to_angle(fit, settled, press_ms) if fit is not None else None
     if measured is None:
-        return finish(Landing("no fit", verdict=verdict, error_deg=err),
+        return finish(Landing("no fit", verdict=verdict, error_deg=err,
+                              great_measured=graded_zone),
                       settled_deg=round(settled, 1), verdict=verdict,
                       error_deg=None if err is None else round(err, 2))
 
@@ -834,13 +864,14 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
     if not plausible_round_trip(round_trip_ms, fit):
         log(f"  round trip {round_trip_ms:.0f} ms — IMPLAUSIBLE, past half a revolution; "
             f"reading it as a wrap and excluding it{cross}")
-        return finish(Landing("implausible", verdict=verdict, error_deg=err), **scored)
+        return finish(Landing("implausible", verdict=verdict, error_deg=err,
+                              great_measured=graded_zone), **scored)
 
     assumed = lead_ms if lead_ms is not None else getattr(args, "round_trip_ms", 0.0)
     log(f"  round trip {round_trip_ms:.0f} ms measured, against "
         f"{assumed:.0f} ms assumed{cross}")
     return finish(Landing("measured", round_trip_ms=round_trip_ms, verdict=verdict,
-                          error_deg=err), **scored)
+                          error_deg=err, great_measured=graded_zone), **scored)
 
 
 def run(args):
