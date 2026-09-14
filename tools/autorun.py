@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 from dbd.AI_model import AI_model
 from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils import link_state
+from dbd.utils.load_tally import LoadTally
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.key_watcher import ABILITY_KEYCODE, SPACE_KEYCODE, KeyWatcher
 
@@ -847,6 +848,11 @@ def run(args):
     # at shutdown — otherwise "did the wide box do anything tonight?" is unanswerable from
     # a log, which is exactly what happened to the 2026-08-30 match.
     sweeps = SweepTally()
+    # The shell guard reads the load ONCE, before the stream is even up, and a match takes
+    # twenty minutes. Three of the four matches lost to load armed clean and went bad in
+    # the middle, so the run measures itself and states the verdict at shutdown rather
+    # than leaving it to an `uptime` the operator has now forgotten four times.
+    load = LoadTally(gate=os.environ.get("DBD_LOAD_GATE") or None)
     capture = Monitoring_wide if args.wide else Monitoring_window
     monitoring = capture(
         window_query=args.window,
@@ -1108,6 +1114,16 @@ def run(args):
                 frame_bgr = model.grab_screenshot()[:, :, ::-1]
                 pred, desc, probs, should_hit = predict_bgr(frame_bgr)
             frames += 1
+            # Rate-limited inside the tally, so this is a comparison on all but one frame
+            # in ~350. Sampled only while ACTIVE: load while the operator is in another
+            # app is not load the match was played under.
+            crossed = load.sample(captured)
+            if crossed is not None and crossed >= load.gate and load.over == 1:
+                # Said once, at the moment it goes bad, so the log shows WHERE in the match
+                # the contention started rather than only that it happened. Never a sleep
+                # and never fatal: a busy machine is a fine evening to play.
+                log(f"LOAD {crossed:.2f} — above the {load.gate:g} gate. Round trips from "
+                    f"here reflect the LOAD, not the link; do not score this match.")
 
             if keys is not None:
                 # Draining here rather than in the tap costs nothing: each event carries
@@ -1198,7 +1214,15 @@ def run(args):
                                  "lead_requested_ms": round(requested_ms, 1),
                                  "lead_slept_ms": round(
                                      (pressed_at - track_t0) * 1000 - now_ms, 1),
-                                 "frame_age_ms": round(frame_age_ms, 1)})
+                                 "frame_age_ms": round(frame_age_ms, 1),
+                                 # Per fire, not per run: a burst corrupts the checks
+                                 # inside it and leaves the rest of the match perfectly
+                                 # good, so a run-level flag would discard 50 clean fires
+                                 # to exclude 10 bad ones. `rescore_policy.py` can gate on
+                                 # this. Absent on every record written before 2026-09-13;
+                                 # a reader must treat missing as UNKNOWN, never as quiet.
+                                 "load_1min": None if load.last is None
+                                 else round(load.last, 2)})
                     if landing is not None:
                         landings.append(landing)
 
@@ -1293,6 +1317,9 @@ def run(args):
             ReleaseKey(SPACE)  # belt and braces: never exit with the key held
         # The per-check lines scroll past during a match and the log is read afterwards, so
         # the run has to state its own result rather than leaving it to be greped out.
+        # Before the landings numbers on purpose: this line decides whether they mean
+        # anything, and a verdict printed after the figures is a verdict read too late.
+        log(f"  {load.summary()}")
         for line in summarise_landings(landings):
             log(line)
         if no_press:
