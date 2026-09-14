@@ -73,7 +73,7 @@ The 64/128 Hz placement is from listening, not analysis, and the phase sound is 
 
 One change per match, then `tools/rescore_policy.py`, per established methodology.
 
-1. **`yuv444 = 1`.** The needle is red and `NEEDLE_REDNESS` is a chroma measurement, but 4:2:0 carries chroma at quarter resolution. 4:4:4 should sharpen exactly the channel detection depends on, and `MIN_RUN_DEG = 3.0` / `CLOSE_DEG = 4.0` exist to paper over the resulting speckle. Requires HEVC or AV1 and host NVENC 4:4:4 support. Expect thresholds to need a re-check even if sigma improves.
+1. ~~**`yuv444 = 1`.**~~ **WITHDRAWN 2026-09-13 — the host refuses it.** Moonlight warns it is incompatible shortly after launch, so the flag has been set and inert since 09-07; turned off. Keep the reasoning because it was sound and would apply again on a host that supports it: the needle is red and `NEEDLE_REDNESS` is a chroma measurement, but 4:2:0 carries chroma at quarter resolution. 4:4:4 should sharpen exactly the channel detection depends on, and `MIN_RUN_DEG = 3.0` / `CLOSE_DEG = 4.0` exist to paper over the resulting speckle. Requires HEVC or AV1 and host NVENC 4:4:4 support. Expect thresholds to need a re-check even if sigma improves.
 2. **`bitrate` 28000 -> 40000. APPLIED 2026-09-07 17:55, UNTESTED.** Low for 1080p120. Same speckle argument, weaker lever than (1). Note the whole 40-session record to date — including the 09-07 matches — ran at 28000; do not read the new bitrate back onto old sessions.
 3. ~~**Host game capped at 120 fps.**~~ **NOT AN EXPERIMENT — it has been at 120 all along** (confirmed by the operator 2026-09-07). The 4.8 ms figure assumed 60 Hz input sampling; at 120 Hz the residual term is 2.4 ms and cannot be reduced further by this route. See `NOTES-local.md` discriminator #1.
 
@@ -128,7 +128,13 @@ Open, in payoff order:
 3. FOV to 87 — slider not locatable in Settings on 2026-09-01.
 4. Measure the phase band to firm up the 64/128 Hz rows.
 
-**Both `yuv444` and the bitrate raise were applied together on 2026-09-07 17:55 and neither has been played.** That breaks one-change-per-match, so the next match cannot attribute a move to either one on its own — but it is still a valid **discriminator #2**, which asks only whether the VIDEO LEG matters at all. Read it that way: if sigma does not move with both changed, the video leg is exonerated and step 8 is justified on measurement rather than elimination. Only if sigma DOES move is it worth backing the bitrate down to 28000 and re-running to isolate `yuv444`.
+**2026-09-13: `yuv444` was probably NEVER IN EFFECT, and discriminator #2 was never actually run.** The operator reports that Moonlight prints a **"YUV 4:4:4 isn't compatible"** notice shortly after the stream launches, and is turning the setting off. The client flag has been on since 09-07 17:55 and the host has evidently been refusing it the whole time — so every match from 09-07 through 09-13 streamed at 4:2:0 regardless of what the setting said. **This is the machine-truths failure mode exactly: a setting that reports success and answers wrong, with nothing downstream revealing the difference.** Verify a setting is actually IN EFFECT, not merely set — the same lesson the 120 fps cap taught on 09-07, now learned a second time on the same page.
+
+**What that leaves.** Discriminator #2 reduces to the **bitrate raise alone** (28000 -> 40000), which IS in effect and is the weaker of the two levers. So the video leg is not exonerated and step 8 is not yet justified on measurement — the question is still open and the experiment still unrun. Turning `yuv444` off changes nothing about the stream; it removes a flag that was never doing anything and restores the configuration the whole 40-session record was built on.
+
+**One thing to check after flipping it, and it is free.** The doc predicted thresholds would need a re-check if 4:4:4 took effect; the same applies in reverse if it turns out it partially did. The armed log prints a needle fit on every predictive fire, and a healthy one reads **1.4-2.1 deg RMS at 314-342 deg/s** — those are the numbers from the 17:13 match on 09-13, streaming at whatever the link was actually doing. If RMS climbs or `MIN_NEEDLE_STRENGTH` starts missing after the change, the chroma path matters after all and `NEEDLE_REDNESS` needs a look.
+
+**Stale line corrected:** this section previously said neither change "has been played". Matches were played on 09-11, 09-12 and 09-13 — but every one of them ran above the load gate, so none was scorable, which is why the experiment still reads as unrun.
 
 (The host 120 fps cap is closed — it was already in effect. Verify a setting is actually unset before scheduling a match to change it; that error was made twice on 2026-09-07.)
 
