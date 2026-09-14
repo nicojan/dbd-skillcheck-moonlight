@@ -58,6 +58,16 @@ Everything predictive firing depends on has been verified against **75 real skil
 
 ## Resume here
 
+**2026-09-13 (late, 2): the review TUI now asks the operator whether a bout had OFF-CENTRE checks — three states, and `unknown` is one of them.**
+
+**Why an operator field rather than a derived one.** An off-centre check is one whose pixels the production 224 crop never captured, so from inside an armed run it is indistinguishable from a check that did not happen — the bot cannot answer this about itself. The only offline answer is `tools/scan_frames.py`, which costs **~3 hours per session at 2.6-3.3 fps** (measured again tonight at 2.7 fps on `session_20260812_193737`). The operator watching the stream sees the displaced check plainly. So `o` in `tools/review_recordings.py` cycles `unknown -> seen -> none -> unknown`, written to `bout.json` as `off_centre`.
+
+**Three states, not a checkbox, and this is the load-bearing part.** A two-state control defaulting to "no off-centre checks" would manufacture evidence out of every bout nobody got round to marking, and a pile of unset flags would then read as positive evidence that off-centre checks do not occur. That is the shape of reasoning that left the Madness gap unmeasured for weeks. `unknown` is the default, a bogus stored value degrades to `unknown` rather than to `none`, and the label renders `off:?` so an unanswered bout **looks** unanswered. Bouts recorded before tonight have no field at all and read as `unknown`.
+
+**The answer is written for DISCARDED bouts too, before the move.** A bout marked `seen` is the one kind worth rescuing back out of `discard/`, so the flag has to be on disk before the directory travels — writing it only for kept bouts would lose the answer at exactly the moment it becomes the reason to change your mind. The ENTER confirmation also names the count: `move 3 bout(s) to discard/ and keep 1 — 2 of them marked off-centre SEEN!`. Named, not blocked: discarding one is a legitimate choice, it just must not be an accidental one.
+
+**Pinned by 5 new tests in `tools/test_review_recordings.py`, two of them driving a real pty** — `o` once writes `seen`, three presses return to `unknown` — because a key that silently does nothing looks exactly like a key that works. The TUI header and `--list` both report how many bouts are still unanswered.
+
 **2026-09-13 (late): the Performance guard is CONFIRMED LIVE across four matches, the run now measures its own load, and the "36% of presses are ungraded" number was mine and was wrong.**
 
 **Both of the previous handoff's unverified items are closed, by one armed run over four games (`armed-20260913-1741.log`, 17:41-19:49).** The startup line appears (`keys: watching SPACE + Active Ability`), and **`ABILITY_KEYCODE = 3` was read back from 13 real operator presses**, each producing a `PERFORMANCE:` line — so the always-on key tap works outside `--record-keys` too. **The guard cost nothing on the predictive path:** 0 of 60 predictive fires fell inside a stand-down window, while **5 of 11 `NO PRESS` events did** — the bot standing aside on `1-2-3-4!` checks while the operator played them. That is the guard doing exactly its job, in a real match. One stray `f` pair 2 s apart (18:03:09/18:03:11) only extended a window, which is the behaviour `performance_deadline` was written to have.

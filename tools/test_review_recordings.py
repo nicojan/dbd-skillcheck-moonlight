@@ -306,6 +306,119 @@ def test_pty_q_quits_and_changes_nothing():
 # same silent loss the pending notice exists to end — so liveness is the writer's pid,
 # not the flag alone.
 
+def test_off_centre_defaults_to_unknown_and_never_to_no():
+    """The whole reason this is tri-state rather than a checkbox.
+
+    An off-centre check is one the production 224 crop never captured, so from inside a run
+    it is indistinguishable from a check that did not happen; the only other way to find one
+    is a ~3 hour tile sweep. That makes the operator's answer valuable — and makes a DEFAULT
+    answer dangerous. If an unset flag read as "no off-centre checks here", then a pile of
+    bouts nobody got round to marking would read as positive evidence that off-centre checks
+    do not occur, which is precisely the conclusion that left the Madness gap unmeasured.
+    """
+
+    root = tempfile.mkdtemp()
+    try:
+        make_bout(root, "bout_00")
+        bout = scan(root)[0]
+        check("a bout with no field at all reads as unknown",
+              bout.off_centre == bout_session.OFF_CENTRE_UNKNOWN, bout.off_centre)
+        check("and it is NOT the same value as 'none'",
+              bout_session.OFF_CENTRE_UNKNOWN != bout_session.OFF_CENTRE_NONE)
+        check("its label looks unanswered rather than negative",
+              bout.off_centre_label == "off:?", bout.off_centre_label)
+        check("a bogus stored value degrades to unknown, not to none",
+              bout_session.off_centre_of({"off_centre": "sure"})
+              == bout_session.OFF_CENTRE_UNKNOWN)
+        # A fresh bout from the recorder carries the field explicitly.
+        meta = bout_session.new_meta({"left": 0}, {"side": 672}, "20260913-2100", 300.0, 92)
+        check("a newly recorded bout starts unknown too",
+              meta["off_centre"] == bout_session.OFF_CENTRE_UNKNOWN, meta["off_centre"])
+    finally:
+        shutil.rmtree(root)
+
+
+def test_the_off_centre_cycle_visits_all_three_and_returns():
+    order = [bout_session.OFF_CENTRE_UNKNOWN]
+    for _ in range(3):
+        order.append(bout_session.next_off_centre(order[-1]))
+    check("unknown -> seen -> none -> unknown",
+          order == ["unknown", "seen", "none", "unknown"], str(order))
+    check("cycling from a bogus value lands on a real state",
+          bout_session.next_off_centre("wat") in bout_session.OFF_CENTRE_STATES)
+
+
+def test_the_answer_is_written_for_discarded_bouts_too():
+    """A discarded bout's flag must survive the move, or the answer dies with the demotion.
+
+    A bout marked SEEN is the one kind worth rescuing back out of discard/, so the flag has
+    to be on disk BEFORE the directory moves. Writing it only for kept bouts would lose the
+    answer at exactly the moment it becomes the reason to change your mind.
+    """
+
+    root = tempfile.mkdtemp()
+    try:
+        kept = make_bout(root, "bout_00")
+        tossed = make_bout(root, "bout_01")
+        bouts = scan(root)
+        by_name = {b.name: b for b in bouts}
+        by_name["bout_00"].keep = True
+        by_name["bout_00"].off_centre = bout_session.OFF_CENTRE_NONE
+        by_name["bout_01"].off_centre = bout_session.OFF_CENTRE_SEEN
+        apply_selection(bouts, root)
+
+        with open(os.path.join(kept, "bout.json")) as f:
+            kept_meta = json.load(f)
+        check("the kept bout keeps its answer",
+              kept_meta["off_centre"] == "none", kept_meta.get("off_centre"))
+        check("and is marked reviewed", kept_meta["reviewed"] is True)
+
+        moved = os.path.join(root, bout_session.DISCARD_DIR, "bout_01", "bout.json")
+        check("the discarded bout's directory moved", os.path.exists(moved))
+        with open(moved) as f:
+            tossed_meta = json.load(f)
+        check("and its SEEN answer travelled with it",
+              tossed_meta["off_centre"] == "seen", tossed_meta.get("off_centre"))
+        check("the source directory is gone", not os.path.exists(tossed))
+    finally:
+        shutil.rmtree(root)
+
+
+def test_pty_the_o_key_records_an_off_centre_answer():
+    """Driven through a real pty, because a key that silently does nothing looks fine.
+
+    `o` once means SEEN. The bout is then kept with SPACE so the answer has somewhere to
+    land, and the file on disk is what gets asserted — not the screen.
+    """
+
+    root = tempfile.mkdtemp()
+    try:
+        make_bout(root, "bout_00")
+        left = drive_tui(root, [b"o", b" ", b"\r", b"y"])
+        check("the bout survived the apply", left == ["bout_00"], str(left))
+        with open(os.path.join(root, "bout_00", "bout.json")) as f:
+            meta = json.load(f)
+        check("one `o` press recorded SEEN",
+              meta.get("off_centre") == "seen", meta.get("off_centre"))
+    finally:
+        shutil.rmtree(root)
+
+
+def test_pty_three_o_presses_return_to_unknown():
+    """The cycle has to close in the real key handler, not just in `next_off_centre`."""
+
+    root = tempfile.mkdtemp()
+    try:
+        make_bout(root, "bout_00")
+        drive_tui(root, [b"o", b"o", b"o", b" ", b"\r", b"y"])
+        with open(os.path.join(root, "bout_00", "bout.json")) as f:
+            meta = json.load(f)
+        check("three presses land back on unknown",
+              meta.get("off_centre") == "unknown", meta.get("off_centre"))
+    finally:
+        shutil.rmtree(root)
+
+
 def test_active_bout_with_live_writer_is_hidden():
     root = tempfile.mkdtemp()
     try:

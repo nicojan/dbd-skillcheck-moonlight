@@ -33,6 +33,43 @@ KEYS_FILE = "keys.jsonl"
 WIDE_BOUT = "wide_bout"
 DISCARD_DIR = "discard"
 
+# Did the OPERATOR see a skill check drawn away from the centre of the screen during this
+# bout? Three states, never two.
+#
+# The bot cannot answer this about itself: an off-centre check is one whose pixels the
+# production 224 crop never captured, so from inside the run it is indistinguishable from
+# a check that did not happen. The only offline answer is `tools/scan_frames.py`, a tile
+# sweep that costs ~3 HOURS per session at 2.6-3.3 fps. The operator watching the stream
+# sees the displaced check plainly and can say so in a keystroke — which is why this is an
+# operator field and not a derived one.
+#
+# UNKNOWN is the default and must stay distinguishable from NONE. A checkbox defaulting to
+# "no off-centre checks" would manufacture evidence out of every bout nobody got round to
+# marking, and "we have never seen one" is exactly the conclusion that would then be read
+# off a pile of unset flags. The Madness gap went unmeasured for weeks on that shape of
+# reasoning. Absent on every bout recorded before 2026-09-13, which reads as UNKNOWN.
+OFF_CENTRE_UNKNOWN = "unknown"
+OFF_CENTRE_SEEN = "seen"
+OFF_CENTRE_NONE = "none"
+OFF_CENTRE_STATES = (OFF_CENTRE_UNKNOWN, OFF_CENTRE_SEEN, OFF_CENTRE_NONE)
+
+
+def off_centre_of(meta):
+    """The bout's off-centre state, defaulting to UNKNOWN for anything unset or bogus."""
+
+    state = (meta or {}).get("off_centre")
+    return state if state in OFF_CENTRE_STATES else OFF_CENTRE_UNKNOWN
+
+
+def next_off_centre(state):
+    """The next state in the cycle. Pure, so the TUI's key handler can be tested."""
+
+    order = OFF_CENTRE_STATES
+    try:
+        return order[(order.index(state) + 1) % len(order)]
+    except ValueError:
+        return OFF_CENTRE_SEEN      # cycling from a bogus value lands somewhere useful
+
 
 def bout_path(directory):
     return os.path.join(directory, BOUT_FILE)
@@ -93,6 +130,10 @@ def new_meta(content, geometry, started, gap_seconds, quality):
         # grant. See KEYS_FILE.
         "keys_watched": False,
         "keys": 0,
+        # See OFF_CENTRE_* above. Written at record time so the field always exists on a
+        # new bout; the operator sets it in `tools/review_recordings.py` afterwards, which
+        # is the only moment they still remember the match.
+        "off_centre": OFF_CENTRE_UNKNOWN,
         "checks": [],
     }
 
@@ -133,11 +174,30 @@ def mark_closed(meta):
     return meta
 
 
-def mark_reviewed(directory):
+def mark_reviewed(directory, off_centre=None):
     meta = load(directory)
     if meta is None:
         return False
     meta["reviewed"] = True
+    if off_centre is not None:
+        meta["off_centre"] = (off_centre if off_centre in OFF_CENTRE_STATES
+                              else OFF_CENTRE_UNKNOWN)
+    save(directory, meta)
+    return True
+
+
+def set_off_centre(directory, state):
+    """Record the operator's off-centre answer without marking the bout reviewed.
+
+    Separate from `mark_reviewed` because a DISCARDED bout needs its answer written too —
+    the flag is the reason a bout might be worth rescuing, so it has to be on disk before
+    the directory moves, not after.
+    """
+
+    meta = load(directory)
+    if meta is None:
+        return False
+    meta["off_centre"] = state if state in OFF_CENTRE_STATES else OFF_CENTRE_UNKNOWN
     save(directory, meta)
     return True
 

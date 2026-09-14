@@ -61,6 +61,10 @@ class Bout:
         self.frames = int(meta.get("frames", 0))
         self.bytes = bout_session.disk_bytes(directory)
         self.keep = False           # unchecked by default — the whole point
+        # Tri-state, and UNKNOWN until the operator says otherwise. See bout_session's
+        # OFF_CENTRE_* notes: a two-state checkbox here would silently assert "no
+        # off-centre checks" for every bout nobody got round to marking.
+        self.off_centre = bout_session.off_centre_of(meta)
 
     @property
     def started(self):
@@ -76,12 +80,20 @@ class Bout:
     def paths(self):
         return Counter(c.get("path", "?") for c in self.checks)
 
+    @property
+    def off_centre_label(self):
+        """Short, and never blank. An unset flag has to LOOK unset, not look like a no."""
+
+        return {bout_session.OFF_CENTRE_SEEN: "off:SEEN",
+                bout_session.OFF_CENTRE_NONE: "off:none"}.get(self.off_centre, "off:?")
+
     def summary(self):
         by_path = self.paths
         parts = ", ".join(f"{n} {name}" for name, n in sorted(by_path.items()))
         return (f"{self.started}–{self.ended}   {len(self.checks):3d} checks"
                 f"  ({parts or 'none'})".ljust(64)
-                + f"{self.frames:5d} frames  {human_size(self.bytes):>8}")
+                + f"{self.frames:5d} frames  {human_size(self.bytes):>8}"
+                + f"  {self.off_centre_label:>8}")
 
     def middle_frame(self):
         names = sorted(n for n in os.listdir(self.directory) if n.endswith(".jpg"))
@@ -103,9 +115,13 @@ def apply_selection(bouts, root=DEFAULT_ROOT):
     kept, discarded, failures = 0, 0, []
     for bout in bouts:
         if bout.keep:
-            bout_session.mark_reviewed(bout.directory)
+            bout_session.mark_reviewed(bout.directory, bout.off_centre)
             kept += 1
             continue
+        # Written BEFORE the move, and written even though this bout is being discarded.
+        # The flag is the reason a bout might be worth rescuing out of discard/, so it has
+        # to travel with the directory rather than be lost at the moment of demotion.
+        bout_session.set_off_centre(bout.directory, bout.off_centre)
         os.makedirs(discard_root, exist_ok=True)
         target = os.path.join(discard_root, bout.name)
         suffix = 1
@@ -159,6 +175,11 @@ def print_list(bouts):
     for bout in bouts:
         print(f"  [ ] {bout.summary()}")
     print(f"\n{plural(len(bouts), 'bout')}, {human_size(total)}")
+    unknown = sum(1 for b in bouts
+                  if b.off_centre == bout_session.OFF_CENTRE_UNKNOWN)
+    if unknown:
+        print(f"{unknown} of them have no off-centre answer yet — set it in the TUI with "
+              f"`o`, or they read as UNKNOWN forever")
 
 
 # --- the TUI ------------------------------------------------------------------------
@@ -167,16 +188,20 @@ def print_list(bouts):
 # has no TUI framework in the venv. Rendering is kept apart from `scan`/`apply_selection`
 # above so the part that moves data can be tested without a terminal.
 
-HELP = " up/down move   SPACE keep   a all   p preview   ENTER apply   q quit "
+HELP = (" up/down move   SPACE keep   o off-centre?   a all   p preview   "
+        "ENTER apply   q quit ")
 
 
 def draw(screen, bouts, cursor, offset, message):
     screen.erase()
     height, width = screen.getmaxyx()
     keeping = [b for b in bouts if b.keep]
+    unknown = sum(1 for b in bouts if b.off_centre == bout_session.OFF_CENTRE_UNKNOWN)
     header = (f" {plural(len(bouts), 'bout')}, keeping {len(keeping)} "
               f"({human_size(sum(b.bytes for b in keeping))} of "
-              f"{human_size(sum(b.bytes for b in bouts))})")
+              f"{human_size(sum(b.bytes for b in bouts))})"
+              + (f"   {unknown} off-centre unanswered" if unknown else
+                 "   off-centre: all answered"))
     screen.addnstr(0, 0, header.ljust(width - 1), width - 1, curses.A_REVERSE)
 
     rows = max(height - 4, 1)
@@ -249,14 +274,33 @@ def loop(screen, bouts):
             target = not all(b.keep for b in bouts)
             for b in bouts:
                 b.keep = target
+        elif key == ord("o"):
+            # Cycles unknown -> seen -> none -> unknown. A cycle rather than a toggle
+            # because there are three answers and the third one — "I looked, there were
+            # none" — is real evidence that a two-state control cannot express.
+            bout = bouts[cursor]
+            bout.off_centre = bout_session.next_off_centre(bout.off_centre)
+            message = {
+                bout_session.OFF_CENTRE_SEEN:
+                    f"{bout.name}: off-centre checks SEEN — worth keeping",
+                bout_session.OFF_CENTRE_NONE:
+                    f"{bout.name}: no off-centre checks seen",
+            }.get(bout.off_centre, f"{bout.name}: off-centre unknown (not answered)")
         elif key == ord("p"):
             message = preview(bouts[cursor])
         elif key in (curses.KEY_ENTER, 10, 13):
             discarding = sum(1 for b in bouts if not b.keep)
             if discarding == 0:
                 return True
+            # A bout marked SEEN is the one kind this tool exists to save: it holds the
+            # off-centre checks that a 3-hour tile sweep is the only other way to find.
+            # Discarding one is a legitimate choice and not blocked — but it must not be
+            # made by accident, so the count goes in the sentence the operator confirms.
+            flagged = sum(1 for b in bouts
+                          if not b.keep and b.off_centre == bout_session.OFF_CENTRE_SEEN)
+            warning = (f" — {flagged} of them marked off-centre SEEN!" if flagged else "")
             message = (f"move {discarding} bout(s) to discard/ and keep "
-                       f"{len(bouts) - discarding}? y/n")
+                       f"{len(bouts) - discarding}?{warning} y/n")
             draw(screen, bouts, cursor, offset, message)
             if screen.getch() in (ord("y"), ord("Y")):
                 return True
