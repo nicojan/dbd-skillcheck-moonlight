@@ -35,6 +35,8 @@ GAMEUP_START = "  # --- game already running (extracted by tools/test_dbd_shell.
 GAMEUP_END = "  # --- end game already running ---"
 LOAD_START = "  # --- load guard (extracted by tools/test_dbd_shell.py) ---"
 LOAD_END = "  # --- end load guard ---"
+GAMEMODE_START = "  # --- game mode (extracted by tools/test_dbd_shell.py) ---"
+GAMEMODE_END = "  # --- end game mode ---"
 
 STUB_PYTHON = '''#!/usr/bin/env python3
 """Stands in for both .venv/bin/python entry points, told apart by the script argument."""
@@ -438,6 +440,89 @@ def test_the_guard_never_returns():
     # `return` added here later would block a launch on a busy evening.
     block = extract(LOAD_START, LOAD_END)
     check("the load guard has no return/exit", 
+          not re.search(r"^\s*(return|exit)\b", block, re.M), block)
+
+
+# --- the game-mode block -------------------------------------------------------------
+#
+# `bin/game-mode.sh on` quits eleven background apps and records which were running, so
+# `Done Gaming` can put back exactly those. It used to be a separate Raycast command with
+# the same name as this function, which is the kind of collision that reads as "already
+# done" six weeks later. Folded in here it has the load guard's contract: it warns, it
+# never blocks, and a run that got this far must still arm even if the quit fails.
+
+def _run_game_mode(args=(), script=None, env=None):
+    """The block with `bin/game-mode.sh` stubbed. `script` None means the file is absent."""
+
+    block = extract(GAMEMODE_START, GAMEMODE_END)
+    repo = tempfile.mkdtemp(prefix="dbd-gamemode-")
+    try:
+        if script is not None:
+            os.makedirs(os.path.join(repo, "bin"))
+            path = os.path.join(repo, "bin", "game-mode.sh")
+            with open(path, "w") as f:
+                f.write(script)
+            os.chmod(path, 0o755)
+        # The block reads "$*", so the wrapper has to pass the function's own args
+        # through — `as_function` would hand it the repo path as $1 and the --dry-run
+        # case would then never be exercised.
+        quoted = " ".join(f'"{a}"' for a in args)
+        body = f'g() {{\n  local repo="$1"\n  shift\n{block}\n}}\ng "{repo}" {quoted}\n'
+        e = dict(os.environ)
+        e.pop("DBD_NO_GAME_MODE", None)
+        e.update(env or {})
+        out = subprocess.run(["zsh", "-f", "-c", body], capture_output=True, text=True, env=e)
+        return out.returncode, out.stdout + out.stderr
+    finally:
+        shutil.rmtree(repo)
+
+
+QUIT_STUB = '#!/bin/sh\necho "Game mode: closed 11 — Bartender Rocket ($1)"\n'
+
+
+def test_game_mode_quits_the_apps_before_the_armed_run():
+    code, out = _run_game_mode(script=QUIT_STUB)
+    check("the quit runs", "closed 11" in out, out.strip())
+    check("and is asked for `on`, not `off`", "(on)" in out, out.strip())
+    check("and the function carries on", code == 0, f"exit {code}")
+
+
+def test_a_dry_run_closes_nothing():
+    """`dbd --dry-run` presses nothing, so it has no business quitting eleven apps."""
+
+    code, out = _run_game_mode(args=("--dry-run",), script=QUIT_STUB)
+    check("a dry run leaves the apps open", "closed 11" not in out, out.strip())
+    check("and says nothing about it", out.strip() == "", out.strip())
+    code, out = _run_game_mode(args=("--record-keys", "--dry-run"), script=QUIT_STUB)
+    check("...even when --dry-run is not the first argument",
+          "closed 11" not in out, out.strip())
+    code, out = _run_game_mode(args=("--dry-runner",), script=QUIT_STUB)
+    check("but a flag that merely starts the same way still closes them",
+          "closed 11" in out, out.strip())
+
+
+def test_the_off_switch_is_honoured():
+    code, out = _run_game_mode(script=QUIT_STUB, env={"DBD_NO_GAME_MODE": "1"})
+    check("DBD_NO_GAME_MODE=1 skips the quit", "closed 11" not in out, out.strip())
+    check("and still arms", code == 0, f"exit {code}")
+
+
+def test_a_failed_quit_never_costs_the_match():
+    code, out = _run_game_mode(script='#!/bin/sh\nexit 3\n')
+    check("a failing game-mode.sh is named", "playing anyway" in out, out.strip())
+    check("and does not stop the run", code == 0, f"exit {code}")
+
+    code, out = _run_game_mode(script=None)
+    check("a missing game-mode.sh is named", "no bin/game-mode.sh" in out, out.strip())
+    check("and does not stop the run either", code == 0, f"exit {code}")
+
+
+def test_the_game_mode_block_cannot_abort_the_function():
+    """The load guard's rule, and for the same reason: a busy machine is a fine evening to
+    PLAY and only a bad one to SCORE. Closing apps is a convenience, not a precondition."""
+
+    block = extract(GAMEMODE_START, GAMEMODE_END)
+    check("the game-mode block has no return/exit",
           not re.search(r"^\s*(return|exit)\b", block, re.M), block)
 
 

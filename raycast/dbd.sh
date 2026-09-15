@@ -11,7 +11,7 @@
 # Optional parameters:
 # @raycast.icon 🎮
 # @raycast.packageName DBD
-# @raycast.description Quit the background apps before an armed match, remembering which ones were actually running. "Done Gaming" puts them back.
+# @raycast.description Quit the background apps, remembering which were actually running; "Done Gaming" puts them back. The `dbd` SHELL function now does this itself before it arms, so this is for the times you want the apps gone without playing.
 
 set -uo pipefail
 
