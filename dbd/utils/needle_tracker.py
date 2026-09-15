@@ -70,6 +70,15 @@ MAX_GREAT_DEG = 20.0  # ...and the other end of that same fact. A `full white` c
                       # every one came back GREAT by construction and pulled the match
                       # tally from 78% to 84%. Grade only a band we actually measured.
 CLOSE_DEG = 4.0       # bridge dropouts this short; antialiasing punches 1-2 deg holes
+NARROW_ZONE_DEG = 25.0  # a whiteness read this narrow is not a zone any check draws — the
+                      # drawn minimum is 33 deg (`full white`) and 45 on `repair-heal`. It
+                      # is the signature of an AMBER success zone: see `drawn_image`.
+MAX_ZONE_DEG = 120.0  # ...and the bound on what widening may claim. A drawn zone measures
+                      # 33-60 deg; anything past this is scene clutter joined up by
+                      # `_close_gaps`, not an arc, so the narrow read is kept instead.
+ARC_REDNESS = 100.0   # separates the NEEDLE from an amber arc. The needle measures ~164 of
+                      # red dominance, an amber success zone 26-35 — so NEEDLE_REDNESS at
+                      # 25 erases both, which is half of why the amber zone reads narrow.
 
 # --- fitting and firing --------------------------------------------------------------
 MIN_ZONE_FRAMES = 5      # frames of static UI needed before the zone median is trustworthy
@@ -524,6 +533,35 @@ def static_image(frames, max_frames=STATIC_FRAMES):
     return np.nanmedian(masked, axis=0)
 
 
+def drawn_image(frames, max_frames=STATIC_FRAMES):
+    """Per-pixel median BRIGHTNESS with the needle masked out — the same UI, hue-blind.
+
+    `static_image` measures WHITENESS, the minimum of the three channels. That is the
+    right measure for the Great band, which is a solid white fill, and the wrong one for a
+    success zone drawn in AMBER: measured off `bout_20260913-180422`, an amber arc reads
+    B 78 / G 95 / R 128, so its whiteness residual never clears `HOT` and the zone reads
+    as nothing at all. Two mechanisms hide it and both have to go: the whiteness itself,
+    and `static_image`'s needle mask, which at `NEEDLE_REDNESS` = 25 also erases an arc
+    whose red dominance is 26-35. The needle's own is ~164, so `ARC_REDNESS` keeps the two
+    apart.
+
+    Only the zone's EXTENT is read from this image. The Great band stays on whiteness: a
+    band is white by definition, and widening the thing that decides where to press is not
+    the same as widening the thing that decides how far past it to aim.
+    """
+
+    if len(frames) > max_frames:
+        picks = np.linspace(0, len(frames) - 1, max_frames).round().astype(int)
+        frames = [frames[i] for i in picks]
+
+    stack = np.stack(frames).astype(np.float32)
+    b, g, r = stack[..., 0], stack[..., 1], stack[..., 2]
+    brightness = np.maximum(np.maximum(r, g), b)
+    masked = np.where(r - np.maximum(g, b) > ARC_REDNESS, np.nan, brightness)
+    masked[:, np.all(np.isnan(masked), axis=0)] = 0.0  # pixels the needle never left
+    return np.nanmedian(masked, axis=0)
+
+
 def refine_centre(static, prior=CENTRE_PRIOR, span=CENTRE_SPAN, step=CENTRE_STEP,
                   search_angle_step=SEARCH_ANGLE_STEP, search_ring_step=SEARCH_RING_STEP):
     """Centre that makes the base ring land at one radius for every angle.
@@ -666,6 +704,55 @@ def find_zone(static, centre, ring_r, angle_step=ANGLE_STEP):
     )
 
 
+def widen_zone(zone, drawn, centre, ring_r, angle_step=ANGLE_STEP):
+    """Re-read a suspiciously narrow zone's EXTENT off the hue-blind image.
+
+    A whiteness read that collapses onto its own Great band is a failed read, not a real
+    zone: 14 of 2825 zoned fires (0.5%), arriving in pairs seconds apart, every one of them
+    a ~10 deg "zone" on a class that draws ~50. Replayed off the recorded frames of four of
+    them the arc is plainly there — 199-248 on `bout_20260913-180422` where whiteness read
+    201-210, and 282-332 on `bout_20260907-223343` where it read 284-294 — drawn in amber
+    rather than white. See `drawn_image`.
+
+    It cost two things, both downstream of the extent and neither of them the press target:
+    `aim_bias_for` found no room and returned 0.0, aiming ~3 deg early on a check that
+    deserved the bias, and `score_freeze` graded a landing inside the real zone a MISS,
+    because 217.0 is outside 201-210 and well inside 197-247.
+
+    Returns the zone unchanged unless the hue-blind image shows a wider arc that CONTAINS
+    the Great band — a run found somewhere else on the ring is clutter, and so is one wider
+    than any check draws. The Great band is never touched.
+    """
+
+    if zone is None:
+        return zone
+
+    radii = np.arange(ring_r + WINDOW_IN, ring_r + WINDOW_OUT, RADIUS_STEP)
+    angles, polar = sample_rays(drawn, centre[0], centre[1], radii, angle_step=angle_step)
+    resid = polar - np.median(polar, axis=0, keepdims=True)
+    thickness = (resid > HOT).sum(axis=1) * RADIUS_STEP
+    lit = _close_gaps(thickness >= ZONE_THICK_PX, angle_step)
+
+    n = len(angles)
+    at = lambda deg: int(round((deg % 360.0) / angle_step)) % n
+    g0, g1 = at(zone.great_start), at((zone.great_end - angle_step) % 360.0)
+    if not (lit[g0] and lit[g1]):
+        return zone  # the band itself is not lit here; this image is not showing the arc
+
+    start = g0
+    while lit[(start - 1) % n] and (g1 - start) % n < n - 1:
+        start = (start - 1) % n
+    end = g1
+    while lit[(end + 1) % n] and (end - start) % n < n - 1:
+        end = (end + 1) % n
+
+    width = ((end - start) % n + 1) * angle_step
+    if width <= zone.zone_width or width > MAX_ZONE_DEG:
+        return zone
+    return replace(zone, zone_start=float(angles[start]),
+                   zone_end=float((angles[start] + width) % 360.0))
+
+
 def fit_sweep(samples):
     """Straight-line fit of angle against time, or None if the samples cannot support one.
 
@@ -702,6 +789,20 @@ def time_to_angle(fit, target_deg, now_ms):
 
 # --- the tracker ---------------------------------------------------------------------
 
+def _read_zone(frames, static, centre, ring_r):
+    """`find_zone`, then a second hue-blind pass ONLY when the read looks degenerate.
+
+    The narrow read is 0.5% of fires, so the centred path that has ~2400 fires behind it
+    pays nothing: on every other check this is `find_zone` and one comparison. `drawn_image`
+    and a second ray sampling are built only for a zone no drawn check reaches.
+    """
+
+    zone = find_zone(static, centre, ring_r)
+    if zone is None or zone.zone_width > NARROW_ZONE_DEG:
+        return zone
+    return widen_zone(zone, drawn_image(frames), centre, ring_r)
+
+
 def observe(state, frame, t_ms):
     """Fold one frame into the state. Returns a new TrackerState; never mutates."""
 
@@ -727,7 +828,7 @@ def observe(state, frame, t_ms):
         # back to a prior in the background — rejecting the check silently.
         cx, cy, ring_r, _ = refine_centre(static, prior=new.centre)
         new = replace(new, centre=(cx, cy), ring_r=ring_r, centre_fixed=True,
-                      zone=find_zone(static, (cx, cy), ring_r))
+                      zone=_read_zone(new.frames, static, (cx, cy), ring_r))
         # The angles so far were measured about the prior, up to 3 px away. Re-measure
         # them about the refined centre rather than fitting a line through two conventions.
         # Pair from the END: `samples` and `frames` are capped at different lengths, so
@@ -740,7 +841,8 @@ def observe(state, frame, t_ms):
         # The zone can be missing early — the needle sitting across it, a dropped frame —
         # and appear once more static frames accumulate. Retrying costs ~9 ms of a ~29 ms
         # frame, so retry periodically rather than every frame.
-        new = replace(new, zone=find_zone(static_image(new.frames), new.centre, new.ring_r))
+        static = static_image(new.frames)
+        new = replace(new, zone=_read_zone(new.frames, static, new.centre, new.ring_r))
 
     return new
 

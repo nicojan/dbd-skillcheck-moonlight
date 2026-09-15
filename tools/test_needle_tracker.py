@@ -24,9 +24,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 
 from dbd.utils.needle_tracker import (
     AIM_BIAS_DEG, Fit, MIN_NEEDLE_STRENGTH, Reading, Sample, TrackerState, ZONE_KEEP_DEG,
-    Zone, aim_bias_for, decide,
-    fit_sweep, lit_floor, lit_span, read_watch, score_freeze, strength_reference,
-    time_to_angle, trim_frozen_tail, _longest_run,
+    Zone, aim_bias_for, decide, drawn_image, find_zone,
+    fit_sweep, lit_floor, lit_span, read_watch, score_freeze, static_image,
+    strength_reference, time_to_angle, trim_frozen_tail, widen_zone, _longest_run,
+    _read_zone,
 )
 
 FAILURES = []
@@ -261,6 +262,121 @@ def test_a_full_white_zone_is_not_graded():
     narrow = Zone(great_start=100.0, great_end=106.5, zone_start=100.0, zone_end=150.0)
     check("a shrunken Hyperfocus band is still graded", narrow.great_measured,
           f"great_width={narrow.great_width}")
+
+
+CHECK_CENTRE = (112.0, 102.0)
+CHECK_RING_R = 65.0
+
+
+def drawn_check(arc_span, arc_colour, band_span=None, band_colour=(255, 255, 255),
+                size=224, centre=CHECK_CENTRE, ring_r=CHECK_RING_R):
+    """One synthetic check: an arc over `arc_span` degrees, with a solid band inside it.
+
+    Angles follow the tracker's convention — 0 is up, clockwise — and the arc is painted
+    2.5 px thick so it clears `ZONE_THICK_PX` without reaching `FILL_RUN_PX`, which is the
+    real difference between a success zone and the Great band drawn inside it.
+    """
+
+    img = np.full((size, size, 3), 12, dtype=np.uint8)
+    for deg10 in range(3600):
+        deg = deg10 / 10.0
+        inside = lambda span: (deg - span[0]) % 360.0 < (span[1] - span[0]) % 360.0
+        if not inside(arc_span):
+            continue
+        solid = band_span is not None and inside(band_span)
+        colour, thick = (band_colour, 8.0) if solid else (arc_colour, 2.5)
+        for r in np.arange(ring_r - thick / 2, ring_r + thick / 2, 0.25):
+            rad = np.deg2rad(deg)
+            y = int(round(centre[1] - r * np.cos(rad)))
+            x = int(round(centre[0] + r * np.sin(rad)))
+            img[y, x] = colour
+    return img
+
+
+def test_an_amber_success_zone_is_read_at_its_real_width():
+    """The failed zone read: 14 of 2825 zoned fires, 0.5%, arriving in pairs.
+
+    Measured off `bout_20260913-180422` at 18:08:22 — whiteness read 201-210 where the arc
+    really runs 199-248 — and off `bout_20260907-223343` at 22:39:10, 284-294 against
+    282-332. The arc is drawn in amber (B 78 / G 95 / R 128), which `static_image` loses
+    twice over: its whiteness is the MINIMUM channel, and its red dominance of 26-35 trips
+    the needle mask at `NEEDLE_REDNESS` = 25. The Great band is white and was always read
+    correctly, so the press target was never the problem — `aim_bias_for` returning 0.0 and
+    a landing inside the real zone grading MISS were.
+    """
+
+    frames = [drawn_check((200.0, 250.0), (78, 95, 128), band_span=(201.0, 211.0))] * 8
+    static = static_image(frames)
+    narrow = find_zone(static, CHECK_CENTRE, CHECK_RING_R)
+    check("whiteness alone reads the amber zone as its own Great band",
+          narrow is not None and narrow.zone_width <= 15.0,
+          f"got {narrow}")
+
+    wide = _read_zone(frames, static, CHECK_CENTRE, CHECK_RING_R)
+    check("the hue-blind pass recovers the real width",
+          wide is not None and 40.0 <= wide.zone_width <= 60.0, f"got {wide}")
+    check("and does not move the Great band",
+          (wide.great_start, wide.great_end) == (narrow.great_start, narrow.great_end),
+          f"{narrow} -> {wide}")
+    check("so the aim bias comes back", aim_bias_for(wide) == AIM_BIAS_DEG,
+          f"got {aim_bias_for(wide)} from {wide}")
+    check("and a landing inside the real zone is no longer a MISS",
+          score_freeze(wide, wide.zone_start + 25.0)[0] != "MISS")
+
+
+def test_a_white_zone_is_left_exactly_as_it_was():
+    """The centred path has ~2400 fires behind it and must not move by a degree."""
+
+    frames = [drawn_check((200.0, 250.0), (210, 210, 210), band_span=(201.0, 211.0))] * 8
+    static = static_image(frames)
+    before = find_zone(static, CHECK_CENTRE, CHECK_RING_R)
+    after = _read_zone(frames, static, CHECK_CENTRE, CHECK_RING_R)
+    check("a white zone is read wide in the first place",
+          before is not None and before.zone_width > 25.0, f"got {before}")
+    check("and the second pass never runs on it", after == before, f"{before} -> {after}")
+
+
+def test_widening_refuses_what_it_cannot_justify():
+    frames = [drawn_check((200.0, 250.0), (78, 95, 128), band_span=(201.0, 211.0))] * 8
+    drawn = drawn_image(frames)
+
+    elsewhere = Zone(great_start=20.0, great_end=30.0, zone_start=20.0, zone_end=30.0)
+    check("a band the arc does not cover is left alone",
+          widen_zone(elsewhere, drawn, CHECK_CENTRE, CHECK_RING_R) == elsewhere)
+
+    already = Zone(great_start=201.0, great_end=211.0, zone_start=195.0, zone_end=260.0)
+    check("a zone already wider than the arc is left alone",
+          widen_zone(already, drawn, CHECK_CENTRE, CHECK_RING_R) == already)
+
+    check("no zone stays no zone",
+          widen_zone(None, drawn, CHECK_CENTRE, CHECK_RING_R) is None)
+
+    smear = drawn_check((150.0, 290.0), (78, 95, 128), band_span=(201.0, 211.0))
+    ring = Zone(great_start=201.0, great_end=211.0, zone_start=201.0, zone_end=211.0)
+    check("an arc wider than any check draws is clutter, not a zone",
+          widen_zone(ring, drawn_image([smear] * 8), CHECK_CENTRE, CHECK_RING_R) == ring)
+
+
+def test_the_needle_survives_the_hue_blind_mask():
+    """`ARC_REDNESS` has to keep an amber arc while still erasing the needle.
+
+    The needle measures ~164 of red dominance and the arc 26-35, so the two are far apart —
+    but a mask loose enough to keep the arc and loose enough to keep the needle would put a
+    radial spike into the zone extent at whatever angle the needle sat.
+    """
+
+    arc = drawn_check((200.0, 250.0), (78, 95, 128), band_span=(201.0, 211.0))
+    with_needle = arc.copy()
+    for r in np.arange(55.0, 80.0, 0.25):      # a still needle at 0 deg, pure red
+        y = int(round(CHECK_CENTRE[1] - r))
+        with_needle[y, int(round(CHECK_CENTRE[0]))] = (7, 9, 173)
+
+    zone = widen_zone(Zone(great_start=201.0, great_end=211.0, zone_start=201.0,
+                           zone_end=211.0),
+                      drawn_image([with_needle] * 8), CHECK_CENTRE, CHECK_RING_R)
+    check("the needle does not extend the zone",
+          zone.zone_width <= 60.0 and not (
+              (0.0 - zone.zone_start) % 360.0 < zone.zone_width), f"got {zone}")
 
 
 def watch_readings(spec, dt_ms=25.0, t0=0.0):
