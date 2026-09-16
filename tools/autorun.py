@@ -681,6 +681,34 @@ def no_press_note(desc, tracker, decision, tracked_ms):
     return note
 
 
+def seen_in(wide, crop_origin, held):
+    """Which window a check was read in, as the two fields its record carries.
+
+    The run summary says how MANY checks locked off-centre; nothing in the per-check
+    record said WHICH, so "did the bot press on a Madness check?" could only be answered
+    by replaying the recorded frames through `look` — and only for the checks that
+    happened to be recorded at all. These two fields close that: a reader can split the
+    fires by window without leaving the queue.
+
+    `crop_origin` is in wide-box pixels, comparable across a run only while the geometry
+    holds; `bout.json` stores that geometry alongside the recorded frames.
+
+    Both are None on a `--no-wide` run, which is the only honest answer there: that path
+    cannot see an off-centre check at all, so reporting `off_centre: false` would assert
+    "this check was centred" on the strength of never having looked — the same shape of
+    manufactured evidence the OFF_CENTRE_UNKNOWN default exists to prevent in
+    `bout_session.py`. Absent on every record written before 2026-09-16, which a reader
+    must likewise treat as UNKNOWN rather than as centred.
+
+    Pure, so the contract can be tested without standing up the live loop.
+    """
+
+    if not wide:
+        return {"crop_origin": None, "off_centre": None}
+    return {"crop_origin": None if crop_origin is None else list(crop_origin),
+            "off_centre": held is not None}
+
+
 def no_press_record(desc, tracker, decision, tracked_ms, context=None):
     """The JSONL record for a check that ended without a press, or None if there is none.
 
@@ -1048,7 +1076,7 @@ def run(args):
             # exists to close, and it was still open for exactly the worst checks.
             record = no_press_record(
                 tracked_desc, tracker, decision, tracked_ms,
-                context={"fire": None, "at": strftime("%H:%M:%S")})
+                context={"fire": None, "at": strftime("%H:%M:%S"), **where_seen()})
             if landing_log is not None:
                 landing_log.write(record)
             record_check(record, "no press")
@@ -1064,6 +1092,11 @@ def run(args):
     frame_ms = DEFAULT_FRAME_MS
     held = None             # the off-centre crop locked on for the check in progress
     crop_origin = None      # where that crop came from, so a move can restart the track
+
+    def where_seen():
+        """`seen_in` for the check in progress. See it for what the fields mean."""
+
+        return seen_in(args.wide, crop_origin, held)
 
     def predict_bgr(crop):
         """`AI_model.predict` on a BGR crop; it wants RGB, everything else here is BGR."""
@@ -1344,7 +1377,8 @@ def run(args):
                                  # this. Absent on every record written before 2026-09-13;
                                  # a reader must treat missing as UNKNOWN, never as quiet.
                                  "load_1min": None if load.last is None
-                                 else round(load.last, 2)})
+                                 else round(load.last, 2),
+                                 **where_seen()})
                     if landing is not None:
                         landings.append(landing)
 
