@@ -537,6 +537,167 @@ def test_the_game_mode_block_cannot_abort_the_function():
           not re.search(r"^\s*(return|exit)\b", block, re.M), block)
 
 
+# --- the path TO the game-mode block ---------------------------------------------------
+#
+# Everything above tests the game-mode block in ISOLATION: extracted, wrapped, run against
+# a stub repo. That says the block works and says nothing at all about whether `dbd` ever
+# gets there — and "did it get there" is the only question the operator actually asked, on
+# 2026-09-16, when eleven apps were still open after a launch. Between the top of the
+# function and the block sit seven `return 1` gates (no venv, no moonlight binary, an
+# unreachable host, a failed `moonlight list`, an app the host does not offer, a Moonlight
+# that exited on launch, a Moonlight that died during the settle) and one if/elif whose
+# closing `fi` decides whether the block is inside the launch branch or after it. Any of
+# them can skip the quit, and the only symptom is eleven apps that stayed open — no error,
+# no line in armed-*.log, nothing to read back. The block's own output cannot be recovered
+# from the log either: the tee wraps only the armed run, and this runs before it.
+#
+# So this runs the function head for real, from `dbd() {` through the end of the block,
+# with the outside world stubbed, and asks whether game-mode.sh was invoked. HOME is
+# redirected rather than the repo path parameterised, because `local repo=` is spelled
+# "$HOME/dev/dbd_autoSkillCheck" in the function and a test that rewrites that line is
+# testing its own rewrite.
+
+HEAD_START = "dbd() {"
+
+# `pgrep -f "Moonlight stream ..."` matching is what sets already_streaming, which skips
+# the 4 s probe and the 30 s settle. That is not a shortcut around the code under test:
+# the resumed-stream path is the one an operator takes all evening, and taking it keeps
+# this test at well under a second instead of 34.
+PATH_STUBS = {
+    "pgrep": '#!/bin/sh\nexit 0\n',
+    "open": '#!/bin/sh\nexit 0\n',
+}
+
+
+def _ssh_stub(reachable=True, game_up=False):
+    """One stub for all three ssh calls in the head, told apart by the remote command."""
+
+    return (
+        '#!/bin/sh\n'
+        'for a in "$@"; do\n'
+        '  case "$a" in\n'
+        f'    *pgrep*DeadByDaylight*) exit {0 if game_up else 1} ;;\n'
+        '    *rungameid*) echo "LAUNCHED" >&2; exit 0 ;;\n'
+        '  esac\n'
+        'done\n'
+        f'exit {0 if reachable else 255}\n'
+    )
+
+
+def _run_to_game_mode(reachable=True, list_ok=True, offers_app=True, game_up=False,
+                      args=(), env=None):
+    """Run `dbd` from its first line to the end of the game-mode block.
+
+    Returns (exit code, output, quit_ran) where quit_ran is whether the stubbed
+    bin/game-mode.sh was actually invoked — the thing nothing else here checks.
+    """
+
+    block = extract(HEAD_START, GAMEMODE_END)
+    home = tempfile.mkdtemp(prefix="dbd-reach-home-")
+    try:
+        repo = os.path.join(home, "dev", "dbd_autoSkillCheck")
+        os.makedirs(os.path.join(repo, ".venv/bin"))
+        os.makedirs(os.path.join(repo, "tools"))
+        os.makedirs(os.path.join(repo, "bin"))
+        stub = os.path.join(repo, ".venv/bin/python")
+        with open(stub, "w") as f:
+            f.write(STUB_PYTHON)
+        os.chmod(stub, 0o755)
+        for name in ("autorun.py", "review_recordings.py"):
+            open(os.path.join(repo, "tools", name), "w").close()
+
+        # The marker is a file and not a line of output because the question is whether
+        # the script RAN. Output can be swallowed by a redirect; the file cannot.
+        marker = os.path.join(home, "game-mode-ran")
+        quit_stub = os.path.join(repo, "bin", "game-mode.sh")
+        with open(quit_stub, "w") as f:
+            f.write(f'#!/bin/sh\nprintf "%s\\n" "$1" > "{marker}"\n'
+                    'echo "Game mode: closed 11 — Bartender Rocket"\n')
+        os.chmod(quit_stub, 0o755)
+
+        shims = os.path.join(home, "shims")
+        os.makedirs(shims)
+        stubs = dict(PATH_STUBS)
+        stubs["ssh"] = _ssh_stub(reachable=reachable, game_up=game_up)
+        stubs["moonlight"] = (
+            '#!/bin/sh\n'
+            f'[ "$1" = list ] || exit 0\n'
+            f'{"exit 1" if not list_ok else ""}\n'
+            + (f'printf "%s\\n" "Steam Big Picture"\n' if offers_app
+               else 'printf "%s\\n" "Desktop"\n')
+        )
+        for name, text in stubs.items():
+            path = os.path.join(shims, name)
+            with open(path, "w") as f:
+                f.write(text)
+            os.chmod(path, 0o755)
+
+        quoted = " ".join(f'"{a}"' for a in args)
+        script = (f'PATH="{shims}:$PATH"\n{block}\n}}\ndbd {quoted}\n')
+        e = dict(os.environ)
+        e.pop("DBD_NO_GAME_MODE", None)
+        e.pop("DBD_NO_GAME", None)
+        e["HOME"] = home
+        e["DBD_MOONLIGHT"] = os.path.join(shims, "moonlight")
+        e["DBD_WAIT"] = "0"
+        e.update(env or {})
+        out = subprocess.run(["zsh", "-f", "-c", script], capture_output=True,
+                             text=True, env=e, timeout=60)
+        return out.returncode, out.stdout + out.stderr, os.path.exists(marker)
+    finally:
+        shutil.rmtree(home)
+
+
+def test_a_normal_launch_reaches_the_game_mode_block():
+    """The 2026-09-16 report, as a test: the apps were still open after a launch."""
+
+    code, out, quit_ran = _run_to_game_mode()
+    check("a launch that gets past the preflight quits the apps", quit_ran, out.strip())
+    check("and asks for `on`", "closed 11" in out, out.strip())
+    check("and the head exits clean", code == 0, f"exit {code}: {out.strip()}")
+
+
+def test_an_already_running_game_still_reaches_it():
+    """The if/elif immediately above the block. If its `fi` ever moves inside the launch
+    branch, THIS is the path that silently stops closing apps — and it is the common one,
+    because restarting the bot after a Ctrl-C always takes it."""
+
+    code, out, quit_ran = _run_to_game_mode(game_up=True)
+    check("a game already up does not skip the quit", quit_ran, out.strip())
+    check("and it is recognised as already running",
+          "already running" in out, out.strip())
+
+
+def test_the_no_game_switch_still_reaches_it():
+    """DBD_NO_GAME suppresses the Steam launch, not the app quit."""
+
+    code, out, quit_ran = _run_to_game_mode(env={"DBD_NO_GAME": "1"})
+    check("DBD_NO_GAME still quits the apps", quit_ran, out.strip())
+
+
+def test_a_preflight_failure_leaves_the_apps_open():
+    """The other half of the contract, and the reason the block sits where it does: a run
+    that never reaches a stream must not leave eleven apps closed and a manifest to undo
+    by hand. Each of these is a `return 1` above the block."""
+
+    for name, knobs in (("an unreachable host", dict(reachable=False)),
+                        ("a failed `moonlight list`", dict(list_ok=False)),
+                        ("an app the host does not offer", dict(offers_app=False))):
+        code, out, quit_ran = _run_to_game_mode(**knobs)
+        check(f"{name} closes nothing", not quit_ran, out.strip())
+        check(f"{name} stops the launch", code != 0, f"exit {code}: {out.strip()}")
+
+
+def test_a_dry_run_reaches_the_block_and_closes_nothing():
+    """Distinguishes the two silences that look identical from outside: `--dry-run` must
+    reach the block and decline, not be skipped by a preflight gate on the way."""
+
+    code, out, quit_ran = _run_to_game_mode(args=("--dry-run",))
+    check("a dry run closes nothing", not quit_ran, out.strip())
+    check("but still gets all the way through the head",
+          code == 0, f"exit {code}: {out.strip()}")
+
+
 def main():
     print("dbd shell function")
     if not shutil.which("zsh"):
