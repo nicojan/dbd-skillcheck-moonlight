@@ -11,6 +11,15 @@ The second failure is the opposite direction and is why `scorable` is written th
 is: a run with no evidence must not be condemned. Unknown is not unscorable, and a tally
 that reported "DO NOT SCORE" for an unreadable load average would throw away good matches
 to protect a statistic — which is the same trade the shell guard already refuses to make.
+
+The third is the warm-up grace, added 2026-09-17, and it faces both ways at once. `dbd`
+quits eleven apps immediately before the bot starts and the 1-minute average lags that
+teardown by a minute, so without a grace the peak of a quiet evening is the sound of the
+machine being made quiet — a DO NOT SCORE for the event that proves the setup worked. But
+a grace is also exactly how you would hide a real burst, so the cases below pin both: it
+must not count the early spike against the run, it must still REPORT it, it must still
+stamp `last` for the fires inside it, and contention that outlasts it must be caught in
+full.
 """
 
 import os
@@ -19,7 +28,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from dbd.utils.load_tally import DEFAULT_GATE, LoadTally
+from dbd.utils.load_tally import DEFAULT_GATE, WARMUP_SECONDS, LoadTally
 
 FAILED = []
 
@@ -45,6 +54,11 @@ class Fake:
         return self.values.pop(0) if self.values else None
 
     def tally(self, **kw):
+        # warmup=0 unless a test says otherwise. These fakes run a whole match in 40
+        # simulated seconds, so the default 90 s grace would swallow every case that is
+        # not about the grace; the grace has its own tests below, including one that the
+        # DEFAULT is on.
+        kw.setdefault("warmup", 0)
         return LoadTally(clock=self.clock, reader=self.read, interval=self.step, **kw)
 
     def run(self, tally, frames=None):
@@ -95,9 +109,71 @@ def test_unknown_is_not_unscorable():
     check("and it says it was not measured", "not measured" in t.summary(), t.summary())
 
 
+def test_the_warmup_grace_does_not_count_the_quit_spike():
+    """The grace: game mode's own teardown must not condemn a quiet match."""
+
+    # 90 s of grace at one sample per 10 s is the first nine samples. The spike sits in
+    # them and nowhere else, which is the shape of a clean evening.
+    f = Fake([9.9, 8.4, 7.1, 5.0] + [1.2] * 8, step=10.0)
+    t = f.run(f.tally(warmup=WARMUP_SECONDS))
+    check("the run is scorable", t.scorable is True, t.summary())
+    check("the spike is not the run's peak", t.peak == 1.2, t.peak)
+    check("but it is reported, not swallowed", t.warmup_peak == 9.9, t.warmup_peak)
+    check("and counted as over-gate inside the grace", t.warmup_over == 3, t.warmup_over)
+    check("the summary says the grace caught something", "warm-up grace" in t.summary(),
+          t.summary())
+    check("and still says SCORABLE", "SCORABLE" in t.summary(), t.summary())
+
+
+def test_the_grace_hides_nothing_that_outlasts_it():
+    """A real burst that straddles the grace is still caught in full."""
+
+    # Loud from the start and STILL loud after 90 s — a build in another session, not a
+    # teardown. The grace must not launder this.
+    f = Fake([9.9] * 12, step=10.0)
+    t = f.run(f.tally(warmup=WARMUP_SECONDS))
+    check("NOT scorable", t.scorable is False, t.summary())
+    check("says DO NOT SCORE", "DO NOT SCORE" in t.summary(), t.summary())
+    check("only the post-grace samples are counted against the gate",
+          t.over == t.samples and t.samples == 3, (t.over, t.samples))
+
+
+def test_a_fire_inside_the_grace_still_carries_its_own_load():
+    """`last` is what the check record stamps per fire, and the grace must not touch it."""
+
+    # The run-level verdict is the thing being graced. A fire is judged on its own
+    # `load_1min`, so a graced sample that does not update `last` would quietly stamp
+    # None (= UNKNOWN) onto the very checks most likely to be corrupt.
+    f = Fake([9.9], step=10.0)
+    t = LoadTally(clock=f.clock, reader=f.read, interval=10.0, warmup=WARMUP_SECONDS)
+    t.sample()
+    check("last is set during the grace", t.last == 9.9, t.last)
+    check("while the run has nothing to judge yet", t.peak is None, t.peak)
+    check("and reports itself as warming", t.warming is True)
+
+
+def test_a_run_shorter_than_the_grace_says_which_silence_it_is():
+    """"Not measured" must not be ambiguous with a broken tally."""
+
+    f = Fake([2.0, 2.2], step=10.0)
+    t = f.run(f.tally(warmup=WARMUP_SECONDS))
+    check("no counted samples", t.samples == 0, t.samples)
+    check("but the grace saw some", t.warmup_samples == 2, t.warmup_samples)
+    check("scorable — no evidence against it", t.scorable is True)
+    check("and it names the grace as the reason", "warm-up grace" in t.summary(), t.summary())
+
+
+def test_the_grace_is_on_by_default():
+    # The whole point is that a run gets it without autorun.py asking. A default of 0
+    # would pass every test above and change nothing in production.
+    t = LoadTally(clock=lambda: 0.0, reader=lambda: 1.0)
+    check("default warmup is WARMUP_SECONDS", t.warmup == WARMUP_SECONDS, t.warmup)
+    check("which is 90 s", WARMUP_SECONDS == 90.0, WARMUP_SECONDS)
+
+
 def test_a_run_too_short_to_sample_still_reports():
     f = Fake([4.0])
-    t = LoadTally(clock=f.clock, reader=f.read, interval=10.0)
+    t = LoadTally(clock=f.clock, reader=f.read, interval=10.0, warmup=0)
     # The very first call always samples — there is no prior deadline to wait for.
     first = t.sample()
     check("the first call samples immediately", first == 4.0, first)

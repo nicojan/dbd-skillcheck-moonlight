@@ -929,10 +929,13 @@ def run(args):
     # at shutdown — otherwise "did the wide box do anything tonight?" is unanswerable from
     # a log, which is exactly what happened to the 2026-08-30 match.
     sweeps = SweepTally()
-    # The shell guard reads the load ONCE, before the stream is even up, and a match takes
-    # twenty minutes. Three of the four matches lost to load armed clean and went bad in
-    # the middle, so the run measures itself and states the verdict at shutdown rather
-    # than leaving it to an `uptime` the operator has now forgotten four times.
+    # The shell guard reads the load ONCE, before the stream is even up and before game
+    # mode has quit a single app, and a match takes twenty minutes. Three of the four
+    # matches lost to load armed clean and went bad in the middle, so the run measures
+    # itself and states the verdict at shutdown rather than leaving it to an `uptime` the
+    # operator has now forgotten four times. This is also the only load reading taken
+    # under the real workload, which is why the launch guard is a notice and this is the
+    # verdict. Its first 90 s do not count against the gate — see load_tally.py.
     load = LoadTally(gate=os.environ.get("DBD_LOAD_GATE") or None)
     capture = Monitoring_wide if args.wide else Monitoring_window
     monitoring = capture(
@@ -1228,6 +1231,14 @@ def run(args):
                 # and never fatal: a busy machine is a fine evening to play.
                 log(f"LOAD {crossed:.2f} — above the {load.gate:g} gate. Round trips from "
                     f"here reflect the LOAD, not the link; do not score this match.")
+            elif crossed is not None and crossed >= load.gate and load.warmup_over == 1:
+                # The eleven apps game mode just quit are still decaying out of the 1-min
+                # average. Worth saying once — silence here would look like the tally had
+                # missed it — but explicitly NOT a verdict, which is the whole point of
+                # the grace.
+                log(f"load {crossed:.2f} — above the {load.gate:g} gate, inside the "
+                    f"{load.warmup:.0f}s warm-up grace. Most likely game mode's own quit "
+                    f"decaying out; not counted against the run.")
 
             if keys is not None:
                 # Draining here rather than in the tap costs nothing: each event carries

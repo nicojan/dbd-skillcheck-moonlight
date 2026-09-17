@@ -21,6 +21,28 @@ load arrives in bursts — a build kicking off in another session — and a burs
 straddles ten checks has already corrupted them whether or not the machine is quiet again
 by the time the match ends. A mean dilutes exactly the event being looked for.
 
+WHY THE FIRST NINETY SECONDS DO NOT COUNT. `dbd` quits eleven background apps right
+before the bot starts, and quitting them is itself work: teardown, Drive flushing its
+queue, LaunchServices churn. The 1-minute average is an exponential decay with a ~60 s
+time constant, so it LAGS that spike on the way up and takes two to three minutes to come
+back down — which means the highest reading of a perfectly quiet evening is routinely the
+sound of the machine being made quiet. Taking the peak from the first sample condemned
+runs for the one event that proves the setup worked.
+
+The obvious alternative — have the shell read the load AFTER `game-mode.sh on`, past a
+cooldown — cannot work for the same reason: there is no moment before the stream is up
+that predicts the load the armed match will run under, and a read taken five seconds
+after the quit measures the quit. So the grace lives here, where the run is already
+sampling itself, and it is the only load reading that is taken under the real workload
+(Moonlight decode + WindowServer + ONNX at 36 fps + the JPEG writers).
+
+Nothing is hidden by the grace. Contention that outlasts it is sampled after it like any
+other, and a burst confined INSIDE it still stamps every fire it touched through
+`load_1min` in the check record — which is the per-check evidence `rescore_policy.py`
+gates on, and strictly better than a run-level verdict either way. What the grace removes
+is only the run-level DO NOT SCORE, and only for a spike that was over before the match
+was.
+
 THIS NEVER BLOCKS ANYTHING, and it never raises. A busy machine is a fine evening to
 PLAY; it is only a bad evening to SCORE. Refusing a match to protect a data point is the
 wrong way round, and every read is guarded because a load reader that can break an armed
@@ -40,6 +62,13 @@ DEFAULT_GATE = 6.0
 # second. Ten seconds is far finer than the statistic's own averaging window.
 SAMPLE_SECONDS = 10.0
 
+# How long after the first sample the readings are recorded but not counted against the
+# gate. Sized from the statistic, not from taste: a ~60 s time constant needs more than
+# one constant to decay a spike to nothing, and 90 s is the point past which the eleven
+# quit apps cannot still be the reason. It is also the stretch of a match the operator
+# spends in a loading screen and a lobby, so little of it is fires.
+WARMUP_SECONDS = 90.0
+
 
 def read_load():
     """The 1-minute load average, or None where the platform has no such thing."""
@@ -58,19 +87,27 @@ class LoadTally:
     """
 
     def __init__(self, gate=None, clock=None, reader=read_load,
-                 interval=SAMPLE_SECONDS):
+                 interval=SAMPLE_SECONDS, warmup=None):
         from time import monotonic
 
         self.gate = DEFAULT_GATE if gate is None else float(gate)
         self.clock = monotonic if clock is None else clock
         self.reader = reader
         self.interval = interval
+        # 0 disables the grace, which is what a test that wants the old behaviour passes.
+        self.warmup = WARMUP_SECONDS if warmup is None else float(warmup)
         self.samples = 0
         self.over = 0            # samples at or above the gate
         self.peak = None         # highest 1-minute average seen
         self.peak_at = None      # clock reading when the peak was taken
-        self.last = None         # most recent reading
+        self.last = None         # most recent reading, grace or not
         self.unreadable = 0
+        # The grace is tallied separately rather than dropped: "the machine was loud while
+        # it went quiet" is worth one line at shutdown, and silently discarding readings
+        # is how a measurement starts lying quietly.
+        self.warmup_samples = 0
+        self.warmup_over = 0
+        self.warmup_peak = None
         self._next_at = None
         self._t0 = None
 
@@ -93,13 +130,30 @@ class LoadTally:
             self.unreadable += 1
             return None
 
-        self.samples += 1
+        # `last` is set whatever window this falls in, because it is what the check record
+        # stamps per fire. A fire inside the grace must carry the load it was actually
+        # fired under; the grace decides what the RUN is judged on, never what a fire says.
         self.last = value
+        if now - self._t0 < self.warmup:
+            self.warmup_samples += 1
+            if value >= self.gate:
+                self.warmup_over += 1
+            if self.warmup_peak is None or value > self.warmup_peak:
+                self.warmup_peak = value
+            return value
+
+        self.samples += 1
         if value >= self.gate:
             self.over += 1
         if self.peak is None or value > self.peak:
             self.peak, self.peak_at = value, now
         return value
+
+    @property
+    def warming(self):
+        """Is the most recent sample inside the grace? False before the first one."""
+
+        return self._t0 is not None and self.clock() - self._t0 < self.warmup
 
     @property
     def scorable(self):
@@ -116,15 +170,27 @@ class LoadTally:
         """One line for the shutdown block. Always says something, including when quiet."""
 
         if self.samples == 0:
+            if self.warmup_samples:
+                # A run that never outlived the grace. Say which silence this is: an
+                # unqualified "not measured" here reads as a broken tally.
+                return (f"load: not measured — the whole run fell inside the "
+                        f"{self.warmup:.0f}s warm-up grace "
+                        f"({self.warmup_samples} samples, peak {self.warmup_peak:.2f})")
             why = "no readable load average" if self.unreadable else "run too short to sample"
             return f"load: not measured — {why}"
 
         head = (f"load: peak {self.peak:.2f}, last {self.last:.2f} "
                 f"over {self.samples} samples (gate {self.gate:g})")
+        # Only worth a clause when the grace actually caught something: this is the line
+        # that tells the operator the quit spike was seen and deliberately not counted.
+        if self.warmup_over:
+            head += (f" [+{self.warmup_over} in the {self.warmup:.0f}s warm-up grace, "
+                     f"peak {self.warmup_peak:.2f}, not counted]")
         if self.scorable:
             # A quiet run has to say so out loud. "Nothing was printed" is not evidence
             # the machine was idle — it is indistinguishable from the tally never running.
             return head + " — SCORABLE"
         held = self.over * self.interval
         return (head + f" — DO NOT SCORE: {self.over} of {self.samples} samples at or "
-                f"above the gate (~{held:.0f}s). Round trips reflect the LOAD, not the link.")
+                f"above the gate (~{held:.0f}s). Round trips reflect the LOAD, not the link."
+                " Which checks: gate on each record's own `load_1min`.")

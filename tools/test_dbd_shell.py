@@ -365,6 +365,12 @@ def test_gameup_probe_does_not_match_rungameid():
 # to 43.8 on 14 cores; the recorder and V-Sync were both suspected and cleared before
 # anyone ran `uptime`. The guard is a NOTICE — the one property that must never regress is
 # that it plays on regardless, so every case below asserts a zero exit as well as its text.
+#
+# It is a notice in the strong sense, and that is pinned here: it must NOT declare a match
+# unscorable. It reads before game mode quits eleven apps and before the stream is up, so
+# it both counts apps that are about to close and misses everything the armed match costs.
+# The verdict belongs to `LoadTally`, which samples under the real workload; this guard's
+# job is to name another session's build before a stream has been committed to.
 
 def _run_load(loadavg, ncpu="14", env=None):
     """The load-guard block with `sysctl` stubbed. `loadavg` is its raw vm.loadavg text."""
@@ -399,7 +405,12 @@ def test_high_load_warns_and_does_not_block():
     code, out = _run_load("{ 43.80 12.10 8.00 }")
     check("a saturated machine is named", "43.80" in out and "14 cores" in out, out.strip())
     check("and says the reading is the load, not the link", "LOAD, not the" in out, out.strip())
-    check("and says not to score it", "Do not score this match" in out, out.strip())
+    check("and defers the verdict to the run's own load line",
+          "load: line at shutdown" in out, out.strip())
+    check("and says the background apps are still open",
+          "before game mode quits" in out, out.strip())
+    check("and does NOT pass a verdict of its own",
+          "Do not score" not in out and "DO NOT SCORE" not in out, out.strip())
     check("and STILL plays on", code == 0, f"exit {code}")
 
 
