@@ -74,11 +74,43 @@ def performance_deadline(events, current=0.0, seconds=PERFORMANCE_SECONDS):
     return current
 
 
-def toggle_armed(events, armed):
-    """Fold the operator's toggle presses over the current armed state. Returns a bool.
+# How close two backspaces have to be to read as one deliberate double-tap rather than as
+# two characters being deleted. Also the quiet the burst has to go before the toggle is
+# allowed to act on it: the delay is what lets a THIRD press arrive and cancel the pair.
+#
+# 0.40 s is above a comfortable double-tap and below the 2026-09-18 burst's own 0.14 s
+# spacing, so that burst reads as one run of text rather than six pairs.
+TOGGLE_DOUBLE_TAP_SECONDS = 0.40
 
-    One press, one flip — so a double-tap comes back where it started, and it does not
-    matter whether the two presses land in the same drain or a hundred frames apart.
+
+def toggle_armed(events, armed, pending=None, now=None):
+    """Fold the operator's toggle presses over the current armed state.
+
+    Returns `(armed, pending)`. `pending` is this function's whole memory — a burst that
+    has not gone quiet yet — and the caller must hand it straight back on the next drain
+    or a double-tap split across two drains is lost. At ~26 ms a drain and ~80 ms a
+    double-tap, split is the NORMAL case, not the edge one.
+
+    A TOGGLE IS AN ISOLATED PAIR, NOT A PRESS. Presses within
+    `TOGGLE_DOUBLE_TAP_SECONDS` of each other are one burst; the burst flips the state
+    only if it closed with exactly two presses in it. One press is a character being
+    deleted. Three or more is a line being deleted. Neither moves the bot.
+
+    WHY NOT PARITY. It was one press, one flip until 2026-09-18, when 13 backspaces in
+    ~4 s disarmed the bot for 4m18s and cost three repair-heal checks — 13 being odd. Any
+    rule that folds each press into the state has that failure somewhere in it, so the
+    fold is gone: a burst is classified as a whole and an unrecognised burst is inert.
+
+    `now` closes a burst that has gone quiet, and must be on the same clock as
+    `event["t"]` — `monotonic`, which is what both `KeyWatcher` and the armed loop's
+    `captured` use. Omitting it leaves the burst open, so a caller that forgets the clock
+    under-toggles rather than toggling at the wrong moment; that is the safe direction,
+    because a toggle that does not happen is one the operator can see and repeat.
+
+    AUTOREPEAT IS NOT A PRESS. A held key emits a stream of key-downs flagged `repeat`,
+    and counting those would make a single held backspace look like a long burst — or,
+    worse, like a pair. Whether the 2026-09-18 burst was held or tapped was never settled:
+    that run wrote no `keys.jsonl`. Both doors are shut rather than the likelier one.
 
     NOT filtered on `source`. The bot never sends this key, and if some future path did,
     a bot that can disarm itself is a bug worth seeing in the log rather than one this
@@ -89,10 +121,27 @@ def toggle_armed(events, armed):
     this toggle could introduce, and it must never depend on the fold noticing it.
     """
 
+    def close(burst, armed):
+        # A burst of exactly two is the only thing the operator can have meant.
+        return (not armed) if burst is not None and burst[1] == 2 else armed
+
     for event in events:
-        if event["keycode"] == TOGGLE_KEYCODE:
-            armed = not armed
-    return armed
+        if event.get("keycode") != TOGGLE_KEYCODE or event.get("repeat"):
+            continue
+        t = float(event["t"])
+        if pending is not None and t - pending[0] <= TOGGLE_DOUBLE_TAP_SECONDS:
+            pending = (t, pending[1] + 1)       # same burst, still open
+        else:
+            armed = close(pending, armed)       # the gap ended the one before it
+            pending = (t, 1)
+
+    if pending is not None and now is not None:
+        if now - pending[0] > TOGGLE_DOUBLE_TAP_SECONDS:
+            armed, pending = close(pending, armed), None
+
+    return bool(armed), pending
+
+
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
 from dbd.utils.clip_recorder import (DEFAULT_GAP_SECONDS, DEFAULT_MAX_GB,
                                      DEFAULT_POST_SECONDS, DEFAULT_PRE_SECONDS,
@@ -1006,8 +1055,9 @@ def run(args):
     if keys.start():
         log(f"  keys: watching SPACE + Active Ability; the reactive path stands down for "
             f"{PERFORMANCE_SECONDS:.0f}s after an Active Ability press")
-        log("  keys: BACKSPACE disarms and re-arms the bot — no presses while disarmed, "
-            "but frames keep recording. Only while the game window is frontmost.")
+        log("  keys: DOUBLE-TAP BACKSPACE disarms and re-arms the bot — no presses while "
+            "disarmed, but frames keep recording. Only while the game window is "
+            "frontmost. A single backspace, or a burst of them, is text and is ignored.")
         if args.record_keys:
             log("  keys: also writing keys.jsonl, on the frame clock")
             if not args.dry_run:
@@ -1054,7 +1104,8 @@ def run(args):
     performance_until = 0.0   # monotonic deadline; the reactive path holds off until then
     stood_down = 0            # presses withheld inside a Performance
     last_stand_down = 0.0     # rate-limits the STAND DOWN line to one a second
-    armed = True              # BACKSPACE flips this; see toggle_armed
+    armed = True              # a BACKSPACE double-tap flips this; see toggle_armed
+    toggle_pending = None     # a burst of backspaces that has not gone quiet yet
     held_checks = 0           # checks that came and went with the bot disarmed
     hold_hot_until = None     # keeps the recorder writing through a disarmed check
     landings = []          # one Landing per predictive fire; summarised at exit
@@ -1256,7 +1307,10 @@ def run(args):
                         f"down for {PERFORMANCE_SECONDS:.0f}s; the operator plays "
                         f"1-2-3-4! by hand")
 
-                flipped = toggle_armed(drained, armed)
+                # `captured` is this frame's `monotonic()`, the same clock the tap stamps
+                # presses with — it is what lets a burst that has gone quiet close.
+                flipped, toggle_pending = toggle_armed(drained, armed, toggle_pending,
+                                                       now=captured)
                 if flipped != armed:
                     armed = flipped
                     # Loud, and on its own line. The whole risk of this feature is a run

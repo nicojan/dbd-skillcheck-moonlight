@@ -56,6 +56,12 @@ ABILITY_KEYCODE = 3
 # delete above the arrows (that is 117, `kVK_ForwardDelete`). Chosen because DBD binds
 # nothing to it, so a press inside the game is inert and costs no action.
 #
+# THAT PREMISE IS WRONG WHEN A TEXT FIELD HAS FOCUS. Backspace is inert for DBD's gameplay
+# ACTIONS, but in an in-game text field it is the delete key, and deleting a line of text
+# is a burst of backspaces. On 2026-09-18 a 13-press burst flipped the bot 13 times and
+# left it disarmed for 4m18s, costing three checks. `toggle_armed` now requires an
+# ISOLATED DOUBLE-TAP, so a burst of any length is inert — see `tools/autorun.py`.
+#
 # It is inert only INSIDE the game. This tap is listen-only — it never swallows an event —
 # so a backspace typed anywhere else still deletes a character in whatever has focus, and
 # would silently flip the bot's state at the same time. That is the whole reason
@@ -183,6 +189,13 @@ class KeyWatcher:
                     "keycode": int(code),
                     "source": int(Quartz.CGEventGetIntegerValueField(
                         event, Quartz.kCGEventSourceStateID)),
+                    # A HELD key emits a stream of key-downs, and only the first is a
+                    # press. Recorded rather than dropped: the toggle must not count
+                    # these (2026-09-18), but a repeat is still evidence of what the
+                    # operator's hands were doing, and this file's whole value is that
+                    # nothing is thrown away before the reader sees it.
+                    "repeat": int(Quartz.CGEventGetIntegerValueField(
+                        event, Quartz.kCGKeyboardEventAutorepeat)),
                 })
                 self.presses += 1
         except Exception:                                   # pragma: no cover - env only
