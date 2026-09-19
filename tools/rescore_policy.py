@@ -69,6 +69,27 @@ def clamp_bias(bias_deg, zone):
     return max(0.0, min(bias_deg, room))
 
 
+ZONE_FIELDS = tuple(Zone.__dataclass_fields__)
+
+
+def zone_of(recorded):
+    """A `Zone` from a recorded one, ignoring fields the dataclass has since dropped.
+
+    The record is an append-only archive going back to 2026-08-17 and `Zone` is not: the
+    two 2026-09-12 sessions carry a `zone.outline` that the 09-15 zone-read fix retired.
+    `Zone(**recorded)` raised on it, and because `load_sessions` reads every file before
+    scoring any, ONE stale key took down the whole re-score — the tool NOTES requires
+    before a lead constant may be touched. Dropping unknown keys is the right direction
+    for an archive reader: a field that no longer exists cannot change a grade, while
+    refusing to read the file loses every fire in it.
+
+    A MISSING field still raises, which is the half that must keep failing — that one
+    would silently change the geometry being scored.
+    """
+
+    return Zone(**{k: v for k, v in recorded.items() if k in ZONE_FIELDS})
+
+
 def load_sessions(paths):
     """One list of (record, zone) per file, keeping only fires that can be re-graded.
 
@@ -87,7 +108,7 @@ def load_sessions(paths):
                     continue          # a no-press or an unmeasured landing: nothing to grade
                 if record.get("error_deg") is None or record.get("lead_ms") is None:
                     continue          # pre-dates the fields the translation needs
-                zone = Zone(**record["zone"])
+                zone = zone_of(record["zone"])
                 if not zone.great_measured:
                     continue          # full-white zone; every landing in it would score Great
                 if not 0.0 < record["round_trip_ms"] < MAX_PLAUSIBLE_TRIP_MS:
