@@ -45,6 +45,8 @@ readonly TARGETS=(
 	"Google Drive|/Applications/Google Drive.app"
 	"Rocket|/Applications/Rocket.app"
 	"Velja|/Applications/Velja.app"
+	"TextWarden|/Applications/TextWarden.app"
+	"MeetingBar|/Applications/MeetingBar.app"
 	"Adobe Creative Cloud|/Applications/Utilities/Adobe Creative Cloud/ACC/Creative Cloud.app|/Applications/Utilities/Adobe Creative Cloud/ACC/Creative Cloud Helper.app|/Applications/Utilities/Adobe Creative Cloud Experience/CCXProcess/CCXProcess.app|/Applications/Utilities/Adobe Sync/CoreSync/Core Sync.app|/Library/Application Support/Adobe/Adobe Desktop Common/ADS/Adobe Desktop Service.app|/Library/Application Support/Adobe/Adobe Desktop Common/IPCBox/AdobeIPCBroker.app"
 )
 
