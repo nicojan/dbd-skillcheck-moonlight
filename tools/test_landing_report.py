@@ -701,12 +701,32 @@ def test_the_lead_level_follows_the_link_and_the_burst_rule_still_runs_on_top():
               autorun.lead_level_ms(base, steady + (33.0, 31.0, 34.0)), 34.0)
           == autorun.BURST_LEAD_MS)
 
-    # Both knobs are plateaus: window 7-15 and deadband 12-18 all re-score to 9-11 misses
-    # at 76-77.5% Great. A later edit must not quietly leave that region.
+    # Both knobs are plateaus. The window is unchanged at 7-15. The deadband was 12-18
+    # when the link sat at 60; re-measured seeded over 2961 fires on 2026-09-19 it
+    # plateaus at 6-10 (17-26 misses), because the link moved to 46-51 — inside the old
+    # deadband — and pinned the lead at 60 exactly where the link now lives.
+    #
+    # The asserted floor is 8, not the 6 the re-score plateau reaches, and the two are not
+    # in conflict: `mid` above sits at median 52, exactly 8 ms off the constant, so any
+    # deadband under 8 starts following the 50-54 plateau the fixed lead already handles
+    # and the check above it fails. 6 and 7 are reachable, but only by re-justifying that
+    # one — which is the point of leaving the contradiction here rather than widening it.
     check("the window stays inside the region measured as robust",
           7 <= autorun.LEVEL_WINDOW <= 15, autorun.LEVEL_WINDOW)
     check("...and so does the deadband",
-          12.0 <= autorun.LEVEL_DEADBAND_MS <= 18.0, autorun.LEVEL_DEADBAND_MS)
+          8.0 <= autorun.LEVEL_DEADBAND_MS <= 10.0, autorun.LEVEL_DEADBAND_MS)
+
+    # THE 2026-09-18 REGRESSION. Every miss that night was a fire aimed with the
+    # un-adapted 60 while the link had snapped fast; the level was pinned because the
+    # medians before each one sat at 46-51, inside the old 15 ms deadband. The rule must
+    # now follow a link at that level rather than leaving it to the constant.
+    snapped = (47.7, 46.2, 50.1, 49.5, 48.7, 51.3, 47.6, 46.0, 50.3)
+    check("a link sitting at 46-51 now moves the lead off the constant",
+          autorun.lead_level_ms(base, snapped) < base,
+          autorun.lead_level_ms(base, snapped))
+    check("...onto the level it measured",
+          abs(autorun.lead_level_ms(base, snapped) - median(snapped)) < 0.001,
+          autorun.lead_level_ms(base, snapped))
 
     # Pure. The caller owns the sequence and the loop rebuilds it rather than appending.
     trips = (61.0, 60.0, 62.0, 59.0, 63.0)

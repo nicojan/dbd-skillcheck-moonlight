@@ -335,8 +335,38 @@ BURST_TRIP_FLOOR_MS = 20.0
 # link genuinely moved; it adds a miss to none of them. That is the same shape as the burst
 # rule: catch the departure, leave the plateau alone.
 #
-# Every knob is a plateau, not a knife-edge. Window 7/9/11/15 and deadband 12-18 all land
-# between 9 and 11 misses at 76-77.5% Great; the floor is inert anywhere from 25 to 35
+# THE DEADBAND WAS CALIBRATED FOR A LINK THAT NO LONGER EXISTS, and 15 was re-measured to
+# 8 on 2026-09-19. The paragraph above is still true of the record it was written on: with
+# the link sitting at 60, a deadband of 15 covered the plateau and nothing else. The link
+# has since moved to a median of 46-51, which is INSIDE that deadband — so the rule went
+# dormant exactly where the link now lives, and the lead stayed pinned at 60 all session
+# against a ~48 ms link. That is survivable on its own (10 ms is 3 deg at 300 deg/s, which
+# AIM_BIAS_DEG cancels) and fatal the moment the link snaps fast, because nothing is
+# tracking it: BURST_TRIP_MS needs the PREVIOUS trip under 40 and those sat at 46-51.
+#
+# 2026-09-18 is the whole case. Of 223 graded fires, all 4 misses were fires aimed with the
+# un-adapted 60 while the link had snapped to 25-34 ms; the 172 fires aimed with an adapted
+# lead missed none (Fisher exact p = 0.0025). Load does not separate them — the misses sat
+# at 5.9-6.8 against a session median of 6.0.
+#
+# Re-scored SEEDED over all 2961 gradeable fires (the cold-start seed is what actually
+# runs, so `seeded_cold_only` is the baseline; an unseeded re-score is the mistake NOTES
+# forbids and the one that got the 50 ms lead reverted):
+#   deadband 15 (was)  74.1% Great, 52 MISS      deadband 10   72.8%, 26 MISS
+#   deadband  8 (now)  72.6% Great, 20 MISS      deadband  6   72.2%, 18 MISS
+# 52 -> 20 misses for 1.5 points of Great rate, about 1.4 Greats per miss avoided. Per
+# session: 16 better, 43 unchanged, 2 worse — against the 4-worse that sank the 50 ms lead.
+#
+# Two alternatives were measured and are WORSE, so do not re-propose them. A low-percentile
+# level (shaped to the early/late asymmetry, since an early press leaves the zone and a
+# late one only costs Great->good) is strictly dominated: 67.7% at 35 misses where the
+# deadband gives 72.7% at 41. Raising BURST_TRIP_MS alone loses to the deadband at every
+# matched miss count. And every AIM_BIAS_DEG point is off the Pareto frontier entirely —
+# the bias was never the knob for this, which is the other half of why it stays at 3.0.
+#
+# Every knob is a plateau, not a knife-edge. Window 7/9/11/15 is unchanged; the deadband
+# now plateaus at 6-10 (17-26 misses), and past 4 it buys no further misses and keeps
+# costing Greats. The floor is inert anywhere from 25 to 35
 # (identical totals) and only matters as a bound on how far one bad run could drag the aim.
 # LEVEL_MIN_SAMPLES exists because a median of one or two readings is just the reading —
 # under it the session runs on the constant, which is what every session's first checks do.
@@ -346,7 +376,7 @@ BURST_TRIP_FLOOR_MS = 20.0
 # broken measurements, and the clamp bounds it even if they were plausible.
 LEVEL_WINDOW = 9
 LEVEL_MIN_SAMPLES = 3
-LEVEL_DEADBAND_MS = 15.0
+LEVEL_DEADBAND_MS = 8.0
 LEVEL_MIN_MS = 30.0
 LEVEL_MAX_MS = 70.0
 
