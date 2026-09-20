@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import autorun
+import check_log
 from dbd.utils import link_state
 
 FAILED = []
@@ -88,16 +89,57 @@ def test_no_seed_changes_nothing():
 def test_a_fabricated_args_cannot_write_the_real_state_file():
     """The regression: `test_landing_report` drives autorun's shutdown block with stub
     landings, and an unguarded save stamped a 60.0 ms level into the repo's real state.
-    The next real match would have cold-started from it."""
+    The next real match would have cold-started from it.
+
+    It ran with `cwd` at the repo root, which is what makes this the right place to catch
+    the whole class: a test that drives `run` writes through the SAME defaults a match
+    does, so any output path the test forgets to redirect lands in live data. The state
+    file was the first one found. The check queue was the second — see below.
+
+    Run as a subprocess ON PURPOSE. These are process-wide default paths, so a guard that
+    only held in-process would pass here and still let the real thing through.
+    """
 
     import subprocess
     real = link_state.DEFAULT_PATH
     before = os.path.exists(real)
     here = os.path.dirname(os.path.abspath(__file__))
+    repo = os.path.dirname(here)
+    checks = os.path.join(repo, check_log.CHECK_DIR)
+    queued_before = sorted(os.listdir(checks)) if os.path.isdir(checks) else []
+
     subprocess.run([sys.executable, os.path.join(here, "test_landing_report.py")],
-                   cwd=os.path.dirname(here), capture_output=True)
+                   cwd=repo, capture_output=True)
+
     check("a stub-args run leaves the real state file alone",
           os.path.exists(real) == before, f"exists={os.path.exists(real)} was={before}")
+
+    # 2026-09-19: it did not. `run` opened the real `checks/` through CheckLog's default
+    # and filed a synthetic `no press` row per suite run — 10 of them before anyone looked,
+    # each one a record `pull_check_stats.py` would have drained into the archive as match
+    # data. `--check-dir` is the redirect; this is the thing that notices if it goes away.
+    queued_after = sorted(os.listdir(checks)) if os.path.isdir(checks) else []
+    check("...and does not file anything in the live check queue",
+          queued_after == queued_before,
+          f"added {[f for f in queued_after if f not in queued_before]}")
+
+
+def test_the_check_queue_is_redirected_rather_than_switched_off():
+    """`--check-dir` must still WRITE, or the loop's record path is tested by nothing.
+
+    Disabling the queue in the test would also have stopped the pollution, and would have
+    been the other bug: the NO PRESS line shipped untested through exactly that kind of
+    gap. So the guard above is only half the fix, and this is the other half.
+    """
+
+    args = autorun.parse_args(["--check-dir", "/tmp/nowhere-check-dir"])
+    check("the redirect is an argument the loop actually reads",
+          args.check_dir == "/tmp/nowhere-check-dir", args.check_dir)
+    check("...and it defaults to the live queue, so a real match is unaffected",
+          autorun.parse_args([]).check_dir == check_log.CHECK_DIR,
+          autorun.parse_args([]).check_dir)
+    check("the queue is still ON by default — redirect, do not disable",
+          autorun.parse_args([]).check_log_enabled is True)
 
 
 def main():

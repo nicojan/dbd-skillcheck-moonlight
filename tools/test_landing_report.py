@@ -887,8 +887,14 @@ def test_the_loop_actually_prints_the_no_press_line():
     logdir = tempfile.mkdtemp()
     logpath = os.path.join(logdir, "landings-test.jsonl")
     try:
+        # Every path this loop writes is redirected into `logdir`, and `--check-dir` is
+        # the one that was missing: without it `run` opens the REAL `checks/` queue and
+        # files a synthetic `no press` row in it that `pull_check_stats.py` would later
+        # archive as match data. Disabling the queue instead would leave the loop's record
+        # path untested, which is the gap the NO PRESS line shipped through.
         autorun.run(autorun.parse_args(["--no-wide", "--landing-log", logpath,
-                                        "--link-state", logpath + ".state"]))
+                                        "--link-state", logpath + ".state",
+                                        "--check-dir", os.path.join(logdir, "checks")]))
     finally:
         (autorun.AI_model, autorun.Monitoring_window,
          autorun.FocusWatcher, autorun.sleep) = saved

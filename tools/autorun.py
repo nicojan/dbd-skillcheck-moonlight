@@ -147,7 +147,7 @@ from dbd.utils.clip_recorder import (DEFAULT_GAP_SECONDS, DEFAULT_MAX_GB,
                                      DEFAULT_POST_SECONDS, DEFAULT_PRE_SECONDS,
                                      ClipRecorder)
 from dbd.utils.wide_capture import Monitoring_wide, SweepTally, crop_at, look
-from check_log import ROTATE_GAP_SECONDS, CheckLog, reactive_record
+from check_log import CHECK_DIR, ROTATE_GAP_SECONDS, CheckLog, reactive_record
 from dbd.utils.needle_tracker import (
     AIM_BIAS_DEG, CENTRE_PRIOR, ROUND_TRIP_MS, Reading, TrackerState, aim_bias_for,
     decide, mark_fired,
@@ -431,6 +431,15 @@ def parse_args(argv=None):
     p.add_argument("--no-check-log", dest="check_log_enabled", action="store_false",
                    help="don't write the per-check queue under checks/ that "
                         "tools/pull_check_stats.py drains")
+    # Exists for the tests, the same way `--landing-log` and `--link-state` do. A test that
+    # drives `run` writes a REAL check record, and with no way to redirect it that record
+    # lands in the live queue: 10 synthetic `no press` rows reached it on 2026-09-19 before
+    # anything noticed, and `pull_check_stats.py` would have archived them as match data.
+    # Turning the queue off in the test instead would have been the other bug — the loop's
+    # record path is then exercised by nothing at all, which is the gap the NO PRESS line
+    # shipped through. Redirect, do not disable.
+    p.add_argument("--check-dir", default=CHECK_DIR,
+                   help="where the per-check queue is written (default: %(default)s)")
     p.add_argument("--no-landing-log", dest="landing_log_enabled", action="store_false",
                    help="do not record the freeze watch readings")
     p.add_argument("--dry-run", action="store_true", help="log detections without pressing keys")
@@ -1053,7 +1062,8 @@ def run(args):
 
     # The per-check queue. Separate from the archive above on purpose — see check_log.py:
     # this one gets drained by `pull_check_stats.py` and that one never does.
-    check_log = CheckLog() if args.check_log_enabled and not args.dry_run else None
+    check_log = (CheckLog(directory=args.check_dir)
+                 if args.check_log_enabled and not args.dry_run else None)
 
     # Recording rides on the grab the armed loop already takes — no second capture client,
     # because two of those mutually starve on macOS (NOTES-local.md, 2026-08-20).
