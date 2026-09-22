@@ -41,7 +41,7 @@ readonly TARGETS=(
 	"WeChat|/Applications/WeChat.app"
 	"iMessage|/System/Applications/Messages.app"
 	"Default Folder X|/Applications/Default Folder X.app"
-	"Unclutter|/Applications/Unclutter 2.app"
+	"Unclutter|/Applications/Unclutter.app"
 	"Google Drive|/Applications/Google Drive.app"
 	"Rocket|/Applications/Rocket.app"
 	"Velja|/Applications/Velja.app"
@@ -78,8 +78,8 @@ bounded() {
 
 # An app is running if something is executing out of its bundle. Matching the
 # bundle path rather than a process name is what makes "Creative Cloud Helper"
-# and "Unclutter 2" answerable at all — pgrep -x sees a truncated, renamed or
-# shared executable name and says no.
+# answerable at all — pgrep -x sees a truncated, renamed or shared executable
+# name and says no.
 running() {
 	"$PGREP" -f "^$1/Contents/MacOS/" >/dev/null 2>&1
 }
