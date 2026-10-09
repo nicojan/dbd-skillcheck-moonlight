@@ -93,6 +93,8 @@ python3.12 -m venv .venv
 
 Run `git lfs pull` even if cloning seemed to work. `models/model.onnx` is a Git LFS object, and a plain clone leaves you with a 132-byte pointer file that fails at load time with `INVALID_PROTOBUF`. This catches everyone once.
 
+Use Moonlight **6.1.0**. On 6.2.0 the command-line `moonlight stream` that the launcher below relies on fails intermittently with `Failed to connect to <host>` even though the host is paired and online ([moonlight-qt#2039](https://github.com/moonlight-stream/moonlight-qt/issues/2039)). Clicking a host in Moonlight's own window is a different code path and was not tested.
+
 Grant Accessibility permission to whichever terminal you launch from; that is what lets the process inject keys. Without it they go nowhere, and nothing reports an error. Switch terminals and you need a fresh grant.
 
 Training dependencies (torch, torchvision, pytorch-lightning, torchmetrics, about 2.5 GB) are deliberately absent. Nothing in the capture, inference, or keypress path touches them.
@@ -332,6 +334,8 @@ These each cost a day.
 **Sizing a capture box off where the check was SEEN is not the same as sizing it off where a crop can be CENTRED.** A box of side S covers only S-224 pixels of ring positions, because the crop has to be placed around the ring, not merely to contain it. A 560 box picked by bounding the tile origins that fired dropped one of the nine checks it was drawn to cover — its crop clamped at the edge, its ring prior nineteen pixels wrong, and the check silently rejected. The two framings differ by exactly one crop width, which is enough to look like it works.
 
 **A crop that follows the picture must never be allowed to hide the crop that does not.** The off-centre path locks a window on the ring it found and holds it for the check, because re-locating per frame feeds the locator's jitter into the angle. But `full black (out)` is a permissive class, so one false ring that classifies once was enough to lock — and on a Doctor-plus-Storm clip a ring at the box's edge stole a *dead-centre* check on its first frame and sat on it for the remaining thirty-two, suppressing the path that already worked. The lock is now dropped the moment its own window goes empty and the centre does not. Any fallback that can pre-empt the working path needs a way back.
+
+**A version upgrade can break the stream with every log line pointing at the network.** Moonlight 6.2.0 failed 5 of 8 CLI launches with `Failed to connect`, while its log was full of `serverinfo` timeouts to the host's LAN address. Those timeouts are mDNS discovery hitting a firewalled address and also appear on runs that work. What separated pass from fail was the version: 6.1.0, same machine and settings, 6 of 6. When a stream that worked last week stops, diff the client version before reading the network.
 
 **Never measure game geometry through the classifier.** The span of frames labelled `great` gives about 40 degrees, three times the drawn zone, which is wide enough to have wrongly overturned the conclusion in the Status section. That label is a hand-annotated "press about here" cue with margin baked in. Measure pixels.
 
