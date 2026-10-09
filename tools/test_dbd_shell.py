@@ -688,6 +688,38 @@ def test_a_preflight_failure_leaves_the_apps_open():
         check(f"{name} stops the launch", code != 0, f"exit {code}: {out.strip()}")
 
 
+def _fake_moonlight_app(version):
+    """A Moonlight.app holding nothing but an Info.plist with the given version."""
+
+    app = os.path.join(tempfile.mkdtemp(prefix="dbd-mlapp-"), "Moonlight.app")
+    os.makedirs(os.path.join(app, "Contents"))
+    with open(os.path.join(app, "Contents", "Info.plist"), "w") as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<plist version="1.0"><dict><key>CFBundleShortVersionString</key>'
+                f'<string>{version}</string></dict></plist>\n')
+    return app
+
+
+def test_moonlight_6_2_0_is_refused_before_anything_closes():
+    """2026-10-08: 6.2.0's CLI `stream` never sees an already-paired host come online
+    (ComputerSeeker skips the manual re-add that used to re-emit the state change) and
+    fails after 30 s with "Failed to connect to compute". Say so up front instead."""
+
+    bad = _fake_moonlight_app("6.2.0")
+    good = _fake_moonlight_app("6.1.0")
+    try:
+        code, out, quit_ran = _run_to_game_mode(env={"DBD_MOONLIGHT_APP": bad})
+        check("Moonlight 6.2.0 stops the launch", code != 0, f"exit {code}: {out.strip()}")
+        check("and closes nothing", not quit_ran, out.strip())
+        check("and says why", "6.2.0" in out, out.strip())
+        code, out, quit_ran = _run_to_game_mode(env={"DBD_MOONLIGHT_APP": good})
+        check("Moonlight 6.1.0 launches normally", code == 0 and quit_ran,
+              f"exit {code}: {out.strip()}")
+    finally:
+        shutil.rmtree(os.path.dirname(bad))
+        shutil.rmtree(os.path.dirname(good))
+
+
 def test_a_dry_run_reaches_the_block_and_closes_nothing():
     """Distinguishes the two silences that look identical from outside: `--dry-run` must
     reach the block and decline, not be skipped by a preflight gate on the way."""
