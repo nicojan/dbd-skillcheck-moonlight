@@ -7,10 +7,11 @@ Upstream is Windows-only and assumes the game runs on the same machine it is wat
 ## Setup
 
 ```bash
-cd /Users/nicojan/dev/dbd_autoSkillCheck
+cd /Volumes/n1TB/Personal/Projects/dev/dbd_autoSkillCheck
 .venv/bin/python tools/autorun.py --dry-run     # detect and log, press nothing
 ```
 
+- The repo lives on the external drive n1TB (moved from `~/dev` on 2026-10-24); `dbd` stops with "no venv" when the drive is unmounted. `DBD_REPO` overrides the path the `dbd` shell function uses.
 - Python 3.12 venv at `.venv` (system Python is 3.14, too new for the torch path).
 - Deps: `numpy mss onnxruntime pyautogui IPython pillow gradio opencv-python` plus `pyobjc-framework-ApplicationServices`.
 - `git-lfs` installed via Homebrew. **`models/model.onnx` is an LFS file** — a fresh clone gets a 132-byte pointer and fails with `INVALID_PROTOBUF`. Fix: `git lfs pull`.
@@ -767,7 +768,7 @@ Two requirements that were **not** previously written down anywhere, both cheap 
 - **Absolute rate cannot be inferred from build or perk state, only measured per check.** Our absolute scale disagrees with the simulator's base by up to ~10-16% in both directions, while within-chain ratios are clean. Fit the rate live; never derive it from a token count or a build.
 
 ```bash
-cd /Users/nicojan/dev/dbd_autoSkillCheck
+cd /Volumes/n1TB/Personal/Projects/dev/dbd_autoSkillCheck
 .venv/bin/python tools/analyse_needle.py recordings          # 14 checks, needle fit quality
 .venv/bin/python tools/sweep_rates.py --frames frames/session_20260812_193737   # cached: seconds, no inference
 .venv/bin/python tools/ingest_video.py videos/merciless-storm-madness2.mp4      # any downloaded clip -> recordings_video/

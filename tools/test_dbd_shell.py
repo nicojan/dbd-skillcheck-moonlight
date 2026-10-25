@@ -552,10 +552,13 @@ def test_the_game_mode_block_cannot_abort_the_function():
 # from the log either: the tee wraps only the armed run, and this runs before it.
 #
 # So this runs the function head for real, from `dbd() {` through the end of the block,
-# with the outside world stubbed, and asks whether game-mode.sh was invoked. HOME is
-# redirected rather than the repo path parameterised, because `local repo=` is spelled
-# "$HOME/dev/dbd_autoSkillCheck" in the function and a test that rewrites that line is
-# testing its own rewrite.
+# with the outside world stubbed, and asks whether game-mode.sh was invoked. The repo is
+# pointed at a scratch copy through DBD_REPO, which `local repo=` honours ahead of its
+# default, rather than by rewriting that line: a test that rewrites the line is testing
+# its own rewrite. Until 2026-10-24 the default was "$HOME/dev/dbd_autoSkillCheck" and
+# redirecting HOME did this; once the repo moved to an absolute path on n1TB, that
+# redirect stopped reaching it and a run would have fired the REAL bin/game-mode.sh.
+# The guard in _run_to_game_mode refuses to run a head that ignores DBD_REPO.
 
 HEAD_START = "dbd() {"
 
@@ -593,6 +596,9 @@ def _run_to_game_mode(reachable=True, list_ok=True, offers_app=True, game_up=Fal
     """
 
     block = extract(HEAD_START, GAMEMODE_END)
+    if "DBD_REPO" not in block.splitlines()[1]:
+        raise SystemExit("dbd's `local repo=` ignores DBD_REPO, so this test would run the "
+                         "real repo's bin/game-mode.sh and quit the operator's apps. Refusing.")
     home = tempfile.mkdtemp(prefix="dbd-reach-home-")
     try:
         repo = os.path.join(home, "dev", "dbd_autoSkillCheck")
@@ -638,6 +644,7 @@ def _run_to_game_mode(reachable=True, list_ok=True, offers_app=True, game_up=Fal
         e.pop("DBD_NO_GAME_MODE", None)
         e.pop("DBD_NO_GAME", None)
         e["HOME"] = home
+        e["DBD_REPO"] = repo
         e["DBD_MOONLIGHT"] = os.path.join(shims, "moonlight")
         e["DBD_WAIT"] = "0"
         e.update(env or {})

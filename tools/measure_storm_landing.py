@@ -29,7 +29,7 @@ because Storm has no Great tier to find.
 
 import json, os, sys
 import numpy as np, cv2
-sys.path.insert(0, '/Users/nicojan/dev/dbd_autoSkillCheck')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dbd.AI_model import AI_model
 from dbd.utils.monitoring_window import TRAINING_REFERENCE_CROP, TRAINING_REFERENCE_HEIGHT
 from dbd.utils import needle_tracker as nt
