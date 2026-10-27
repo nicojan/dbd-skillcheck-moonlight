@@ -337,6 +337,10 @@ These each cost a day.
 
 **A version upgrade can break the stream with every log line pointing at the network.** Moonlight 6.2.0 failed 5 of 8 CLI launches with `Failed to connect`, while its log was full of `serverinfo` timeouts to the host's LAN address. Those timeouts are mDNS discovery hitting a firewalled address and also appear on runs that work. What separated pass from fail was the version: 6.1.0, same machine and settings, 6 of 6. When a stream that worked last week stops, diff the client version before reading the network.
 
+**"Not paired" can mean paired twice.** After a host-side Sunshine upgrade (2026.914), Moonlight said the host had not been paired while Sunshine still listed the Mac. The new version rejects a client whose certificate matches more than one paired record (`Client certificate identity is not enabled` in `sunshine.log`), and the old version had quietly stored the Mac twice. Re-pairing would add a third. Read the host's log, remove the duplicate from `sunshine_state.json` with Sunshine stopped, and restart it.
+
+**A stream that connects is not a game that launched.** Steam on the host can die on a failed self-update and stay down for days; the next Big Picture launch then streams an empty desktop. Check `~/.steam/steam/logs/bootstrap_log.txt` on the host and restart Steam there.
+
 **Never measure game geometry through the classifier.** The span of frames labelled `great` gives about 40 degrees, three times the drawn zone, which is wide enough to have wrongly overturned the conclusion in the Status section. That label is a hand-annotated "press about here" cue with margin baked in. Measure pixels.
 
 ## Licence and credit
