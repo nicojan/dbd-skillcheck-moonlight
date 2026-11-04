@@ -462,18 +462,43 @@ def test_the_guard_never_returns():
 # done" six weeks later. Folded in here it has the load guard's contract: it warns, it
 # never blocks, and a run that got this far must still arm even if the quit fails.
 
-def _run_game_mode(args=(), script=None, env=None):
-    """The block with `bin/game-mode.sh` stubbed. `script` None means the file is absent."""
+#
+# Since 2026-11-03 (Switchboard migration step 4) the block prefers the Switchboard CLI,
+# `switchboard run game-on`, and falls back to game-mode.sh only when that CLI is absent.
+# The CLI is found through DBD_SWITCHBOARD (default $HOME/.local/bin/switchboard), and
+# every harness here points both HOME and DBD_SWITCHBOARD into a scratch dir: the real
+# CLI is on this machine's PATH and a test that reached it would quit the operator's apps.
+
+def _sb_guard(block):
+    if "DBD_SWITCHBOARD" not in block:
+        raise SystemExit("dbd's game-mode block does not read DBD_SWITCHBOARD, so this test "
+                         "could reach the real Switchboard CLI and quit the operator's "
+                         "apps. Refusing.")
+
+
+def _write_exe(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+    os.chmod(path, 0o755)
+
+
+def _run_game_mode(args=(), script=None, env=None, switchboard=None):
+    """The block with `bin/game-mode.sh` and the Switchboard CLI stubbed.
+
+    `script` / `switchboard` None means that file is absent. Returns (exit code, output,
+    switchboard_args) where switchboard_args is the argv the CLI stub saw, or None."""
 
     block = extract(GAMEMODE_START, GAMEMODE_END)
+    _sb_guard(block)
     repo = tempfile.mkdtemp(prefix="dbd-gamemode-")
     try:
         if script is not None:
-            os.makedirs(os.path.join(repo, "bin"))
-            path = os.path.join(repo, "bin", "game-mode.sh")
-            with open(path, "w") as f:
-                f.write(script)
-            os.chmod(path, 0o755)
+            _write_exe(os.path.join(repo, "bin", "game-mode.sh"), script)
+        sb_path = os.path.join(repo, "sb", "switchboard")
+        sb_marker = os.path.join(repo, "sb-ran")
+        if switchboard is not None:
+            _write_exe(sb_path, f'#!/bin/sh\nprintf "%s " "$@" > "{sb_marker}"\n{switchboard}')
         # The block reads "$*", so the wrapper has to pass the function's own args
         # through — `as_function` would hand it the repo path as $1 and the --dry-run
         # case would then never be exercised.
@@ -481,9 +506,12 @@ def _run_game_mode(args=(), script=None, env=None):
         body = f'g() {{\n  local repo="$1"\n  shift\n{block}\n}}\ng "{repo}" {quoted}\n'
         e = dict(os.environ)
         e.pop("DBD_NO_GAME_MODE", None)
+        e["HOME"] = repo
+        e["DBD_SWITCHBOARD"] = sb_path
         e.update(env or {})
         out = subprocess.run(["zsh", "-f", "-c", body], capture_output=True, text=True, env=e)
-        return out.returncode, out.stdout + out.stderr
+        sb_args = open(sb_marker).read().strip() if os.path.exists(sb_marker) else None
+        return out.returncode, out.stdout + out.stderr, sb_args
     finally:
         shutil.rmtree(repo)
 
@@ -492,7 +520,7 @@ QUIT_STUB = '#!/bin/sh\necho "Game mode: closed 11 — Bartender Rocket ($1)"\n'
 
 
 def test_game_mode_quits_the_apps_before_the_armed_run():
-    code, out = _run_game_mode(script=QUIT_STUB)
+    code, out, _ = _run_game_mode(script=QUIT_STUB)
     check("the quit runs", "closed 11" in out, out.strip())
     check("and is asked for `on`, not `off`", "(on)" in out, out.strip())
     check("and the function carries on", code == 0, f"exit {code}")
@@ -501,31 +529,65 @@ def test_game_mode_quits_the_apps_before_the_armed_run():
 def test_a_dry_run_closes_nothing():
     """`dbd --dry-run` presses nothing, so it has no business quitting eleven apps."""
 
-    code, out = _run_game_mode(args=("--dry-run",), script=QUIT_STUB)
+    code, out, _ = _run_game_mode(args=("--dry-run",), script=QUIT_STUB)
     check("a dry run leaves the apps open", "closed 11" not in out, out.strip())
     check("and says nothing about it", out.strip() == "", out.strip())
-    code, out = _run_game_mode(args=("--record-keys", "--dry-run"), script=QUIT_STUB)
+    code, out, _ = _run_game_mode(args=("--record-keys", "--dry-run"), script=QUIT_STUB)
     check("...even when --dry-run is not the first argument",
           "closed 11" not in out, out.strip())
-    code, out = _run_game_mode(args=("--dry-runner",), script=QUIT_STUB)
+    code, out, _ = _run_game_mode(args=("--dry-runner",), script=QUIT_STUB)
     check("but a flag that merely starts the same way still closes them",
           "closed 11" in out, out.strip())
 
 
 def test_the_off_switch_is_honoured():
-    code, out = _run_game_mode(script=QUIT_STUB, env={"DBD_NO_GAME_MODE": "1"})
+    code, out, _ = _run_game_mode(script=QUIT_STUB, env={"DBD_NO_GAME_MODE": "1"})
     check("DBD_NO_GAME_MODE=1 skips the quit", "closed 11" not in out, out.strip())
     check("and still arms", code == 0, f"exit {code}")
 
 
 def test_a_failed_quit_never_costs_the_match():
-    code, out = _run_game_mode(script='#!/bin/sh\nexit 3\n')
+    code, out, _ = _run_game_mode(script='#!/bin/sh\nexit 3\n')
     check("a failing game-mode.sh is named", "playing anyway" in out, out.strip())
     check("and does not stop the run", code == 0, f"exit {code}")
 
-    code, out = _run_game_mode(script=None)
+    code, out, _ = _run_game_mode(script=None)
     check("a missing game-mode.sh is named", "no bin/game-mode.sh" in out, out.strip())
     check("and does not stop the run either", code == 0, f"exit {code}")
+
+
+SB_OK = 'echo "Game On: closed 11 — Bartender Rocket"\n'
+
+
+def test_switchboard_is_preferred_when_installed():
+    code, out, sb = _run_game_mode(script=QUIT_STUB, switchboard=SB_OK)
+    check("switchboard runs the Game On scenario", sb == "run game-on", repr(sb))
+    check("and its summary is shown", "Game On: closed 11" in out, out.strip())
+    check("and game-mode.sh is NOT also run", "(on)" not in out, out.strip())
+    check("and the function carries on", code == 0, f"exit {code}")
+
+
+def test_switchboard_absent_falls_back_to_game_mode_sh():
+    code, out, sb = _run_game_mode(script=QUIT_STUB, switchboard=None)
+    check("no switchboard CLI -> game-mode.sh on", "(on)" in out, out.strip())
+
+
+def test_a_failed_switchboard_run_never_costs_the_match():
+    """A run that failed may have quit some apps already into Switchboard's slot. Running
+    game-mode.sh on top would start a SECOND manifest to undo, so it warns and plays on."""
+
+    code, out, sb = _run_game_mode(script=QUIT_STUB, switchboard='echo boom >&2\nexit 1\n')
+    check("a failing switchboard is named", "playing anyway" in out, out.strip())
+    check("and game-mode.sh is not run on top of it", "(on)" not in out, out.strip())
+    check("and does not stop the run", code == 0, f"exit {code}")
+
+
+def test_switchboard_respects_dry_run_and_the_off_switch():
+    code, out, sb = _run_game_mode(args=("--dry-run",), script=QUIT_STUB, switchboard=SB_OK)
+    check("a dry run does not call switchboard", sb is None, repr(sb))
+    code, out, sb = _run_game_mode(script=QUIT_STUB, switchboard=SB_OK,
+                                   env={"DBD_NO_GAME_MODE": "1"})
+    check("DBD_NO_GAME_MODE=1 does not call switchboard", sb is None, repr(sb))
 
 
 def test_the_game_mode_block_cannot_abort_the_function():
@@ -596,6 +658,7 @@ def _run_to_game_mode(reachable=True, list_ok=True, offers_app=True, game_up=Fal
     """
 
     block = extract(HEAD_START, GAMEMODE_END)
+    _sb_guard(block)
     if "DBD_REPO" not in block.splitlines()[1]:
         raise SystemExit("dbd's `local repo=` ignores DBD_REPO, so this test would run the "
                          "real repo's bin/game-mode.sh and quit the operator's apps. Refusing.")
@@ -645,6 +708,7 @@ def _run_to_game_mode(reachable=True, list_ok=True, offers_app=True, game_up=Fal
         e.pop("DBD_NO_GAME", None)
         e["HOME"] = home
         e["DBD_REPO"] = repo
+        e["DBD_SWITCHBOARD"] = os.path.join(home, "no-switchboard")
         e["DBD_MOONLIGHT"] = os.path.join(shims, "moonlight")
         e["DBD_WAIT"] = "0"
         e.update(env or {})
