@@ -15,4 +15,11 @@
 
 set -uo pipefail
 
-"$(dirname "$0")/../bin/game-mode.sh" off
+# Since 2026-11-03 Switchboard owns game mode, and its own generated Raycast folder has
+# this command too; this copy stays for rollback. game-mode.sh only when Switchboard is
+# absent: the two keep separate lists of what to reopen, so never mix them in a session.
+sb="${DBD_SWITCHBOARD:-$HOME/.local/bin/switchboard}"
+if [[ -x "$sb" ]]; then
+	exec "$sb" run done-gaming
+fi
+exec "$(dirname "$0")/../bin/game-mode.sh" off
