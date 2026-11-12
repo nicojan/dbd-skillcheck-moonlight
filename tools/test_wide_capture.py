@@ -312,7 +312,7 @@ def test_the_loop_restarts_the_track_when_the_crop_moves():
     autorun.sleep = lambda _s: None
     try:
         autorun.observe = watching_observe
-        autorun.run(autorun.parse_args(["--dry-run", "--no-check-log",
+        autorun.run(autorun.parse_args(["--no-overlay", "--dry-run", "--no-check-log",
                                         "--no-landing-log"]))
     finally:
         (autorun.AI_model, autorun.Monitoring_wide, autorun.FocusWatcher,

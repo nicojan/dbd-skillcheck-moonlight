@@ -26,11 +26,12 @@ are firing where you expect.
 import argparse
 import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from re import sub
 from statistics import median
-from time import monotonic, sleep, strftime
+from time import monotonic, sleep, strftime, time
 from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
@@ -38,6 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 from dbd.AI_model import AI_model
 from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils import link_state
+from dbd.utils import overlay_state
 from dbd.utils.load_tally import LoadTally
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.key_watcher import (ABILITY_KEYCODE, SPACE_KEYCODE, TOGGLE_KEYCODE,
@@ -473,6 +475,12 @@ def parse_args(argv=None):
     p.add_argument("--record-max-gb", type=float, default=DEFAULT_MAX_GB,
                    help="stop recording after this much on disk, so a long session "
                         "cannot fill the volume mid-match")
+    p.add_argument("--no-overlay", dest="overlay", action="store_false",
+                   help="do not start the on-stream status badge (tools/overlay.py)")
+    p.add_argument("--overlay-state", default=overlay_state.DEFAULT_PATH,
+                   help="where the armed loop publishes its state for the overlay")
+    p.add_argument("--overlay-corner", default=overlay_state.DEFAULT_CORNER,
+                   choices=overlay_state.CORNERS)
     args = p.parse_args(argv)
     # Here rather than in `run`, which reaches the recorder only after Moonlight is up and
     # the model is loaded — a flag that turns out to be impossible should say so before the
@@ -1012,6 +1020,45 @@ def report_landing(model, tracker, track_t0, args, pressed_at, fit=None,
                           error_deg=err, great_measured=graded_zone), **scored)
 
 
+def start_overlay(args, log):
+    """Start `tools/overlay.py` as its own process, or None. Never fatal.
+
+    A separate process so nothing it does — a crash, a hang, a slow redraw — can reach the
+    hot loop; it learns the state only from the file `publish` writes. It is handed this
+    pid and exits when the run does, even on a kill that skips `finally`.
+    """
+
+    if not getattr(args, "overlay", False):
+        return None
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "overlay.py")
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, script, "--state", args.overlay_state,
+             "--corner", args.overlay_corner, "--parent-pid", str(os.getpid())],
+            stdin=subprocess.DEVNULL)
+    except OSError as exc:
+        log(f"  overlay: could not start ({exc}) — the run goes on without it")
+        return None
+    log(f"  overlay: status badge in the {args.overlay_corner} corner of the stream "
+        f"(--no-overlay to skip)")
+    return proc
+
+
+def stop_overlay(proc, args):
+    """Mark the run stopped for anything still reading the file, then end the overlay."""
+
+    if proc is None:
+        return
+    if getattr(args, "overlay_state", None):
+        overlay_state.write_state(overlay_state.snapshot(mode="stopped", wall=time()),
+                                  args.overlay_state)
+    proc.terminate()
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
 def run(args):
     # The sweep is silent frame to frame, so the run has to keep its own count and say so
     # at shutdown — otherwise "did the wide box do anything tonight?" is unanswerable from
@@ -1209,6 +1256,40 @@ def run(args):
             return model.grab_screenshot()[:, :, ::-1]
         return crop_at(monitoring.grab_wide(), held.origin, monitoring.geometry)
 
+    overlay = start_overlay(args, log)
+
+    def capture_box():
+        """The screen rect the bot reads — the overlay must stay clear of all of it."""
+
+        return monitoring.geometry.region if args.wide else monitoring.region
+
+    def publish(mode, now, last, force=False):
+        """Feed the overlay. Returns the new `(mode, at)`; a write only on a change or a
+        heartbeat, so the cost is one small file replace a couple of times a second."""
+
+        if overlay is None:
+            # Nothing reading it. Also what keeps a test that drives `run` from writing
+            # the live state file — see `test_landing_report`.
+            return last
+        if not force and last is not None and last[0] == mode \
+                and now - last[1] < overlay_state.HEARTBEAT_SECONDS:
+            return last
+        elapsed = monotonic() - window_start
+        overlay_state.write_state(overlay_state.snapshot(
+            mode=mode, wall=time(), landings=landings, reactive=reactive_presses,
+            standdown_left=max(0.0, performance_until - now) if mode == "standdown" else None,
+            load=load.last, fps=frames / elapsed if active and elapsed > 1.0 else None,
+            capture=capture_box(), content=getattr(monitoring, "content", None)),
+            args.overlay_state)
+        return (mode, now)
+
+    # The first write is forced so the badge never opens on the last run's leftovers.
+    published = None          # (mode, monotonic) of the last overlay write
+    reactive_presses = 0      # reactive fires, for the overlay's tally only
+
+    if overlay is not None:
+        published = publish("paused", monotonic(), None, force=True)
+
     try:
         while True:
             now_active = watcher.is_active()
@@ -1278,6 +1359,7 @@ def run(args):
                     # a message would flip the bot, and the flip would land silently at
                     # the moment the operator tabbed back into a match.
                     keys.drain()
+                published = publish("paused", monotonic(), published)
                 sleep(IDLE_POLL_SECONDS)
                 continue
 
@@ -1365,6 +1447,11 @@ def run(args):
                         # `no press` record — and a check nobody was trying to press is
                         # not a check the bot dropped.
                         tracker, track_t0 = None, None
+
+            # After the toggle and the Performance guard have both had this frame's keys,
+            # so the badge never lags a state change by more than one frame.
+            published = publish(overlay_state.bot_mode(active, armed, performance_until,
+                                                       captured), captured, published)
 
             if last_capture is not None:
                 dt = (captured - last_capture) * 1000.0
@@ -1528,6 +1615,7 @@ def run(args):
 
                 elif should_hit and decision.may_react:
                     hits += 1
+                    reactive_presses += 1
                     fire(args, 0.0)
                     log(f"{'WOULD HIT' if args.dry_run else 'HIT'} reactive: {desc} — "
                         f"tracker stood down ({decision.reason})")
@@ -1561,6 +1649,7 @@ def run(args):
                 hits += 1
                 confidence = float(max(probs.values()))
                 log(f"{'WOULD HIT' if args.dry_run else 'HIT'}: {desc} ({confidence:.3f})")
+                reactive_presses += 1
                 fire(args, 0.0)
                 # Wiggle, and everything under --no-predict. Eight of these in the
                 # 2026-08-24 20:44 session were invisible to every stats tool in the repo.
@@ -1576,6 +1665,7 @@ def run(args):
     finally:
         if not args.dry_run:
             ReleaseKey(SPACE)  # belt and braces: never exit with the key held
+        stop_overlay(overlay, args)
         # The per-check lines scroll past during a match and the log is read afterwards, so
         # the run has to state its own result rather than leaving it to be greped out.
         # Before the landings numbers on purpose: this line decides whether they mean

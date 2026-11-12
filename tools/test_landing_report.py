@@ -892,7 +892,7 @@ def test_the_loop_actually_prints_the_no_press_line():
         # files a synthetic `no press` row in it that `pull_check_stats.py` would later
         # archive as match data. Disabling the queue instead would leave the loop's record
         # path untested, which is the gap the NO PRESS line shipped through.
-        autorun.run(autorun.parse_args(["--no-wide", "--landing-log", logpath,
+        autorun.run(autorun.parse_args(["--no-overlay", "--no-wide", "--landing-log", logpath,
                                         "--link-state", logpath + ".state",
                                         "--check-dir", os.path.join(logdir, "checks")]))
     finally:
@@ -1003,7 +1003,7 @@ def test_the_loop_actually_uses_the_shortened_lead():
         # `--no-wide`: this drives the lead rules through the 224 path StubWindow models.
         # The wide path's own loop wiring is tested in test_wide_capture.py.
         autorun.run(autorun.parse_args(
-            ["--no-wide", "--link-state",
+            ["--no-overlay", "--no-wide", "--link-state",
              os.path.join(tempfile.mkdtemp(), "link_level.json")]))
     finally:
         (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
@@ -1019,6 +1019,109 @@ def test_the_loop_actually_uses_the_shortened_lead():
     check("...and the loop said so", "for this check" in printed, printed[-500:])
     check("the check after a normal round trip went back to the base lead",
           leads_seen[2] == autorun.ROUND_TRIP_MS, leads_seen)
+
+
+def test_the_loop_feeds_the_overlay():
+    """`overlay_state` is tested on its own; this proves `run` actually publishes to it.
+
+    The badge is only worth having if it is never wrong about pressing. So `run` is driven
+    with stubs and an overlay "process" that is a fake: every snapshot the loop writes is
+    captured, and the run must say ARMED while it fires, end on STOPPED, write only to the
+    path it was given, and terminate the overlay it started.
+    """
+    autorun, printed = capture_log()
+    from dbd.utils.needle_tracker import Decision, Fit
+    from dbd.utils import overlay_state
+
+    class StubWatcher:
+        last_frontmost = "Moonlight"
+        def is_active(self):
+            return True
+
+    class StubWindow:
+        region = {"left": 600, "top": 300, "width": 224, "height": 224}
+        content = {"left": 0, "top": 0, "width": 1512, "height": 850}
+        def describe(self):
+            return "stub"
+        def refresh(self):
+            pass
+
+    script = [(1, "repair-heal (out)", False), (0, "none", False)] * 2
+
+    class StubModel:
+        def __init__(self, **kw):
+            self.calls = 0
+        def check_provider(self):
+            return "stub"
+        def grab_screenshot(self):
+            return np.zeros((224, 224, 3), dtype=np.uint8)
+        def predict(self, frame):
+            if self.calls >= len(script):
+                raise KeyboardInterrupt
+            pred, desc, hit = script[self.calls]
+            self.calls += 1
+            return pred, desc, {desc: 1.0}, hit
+        def cleanup(self):
+            pass
+
+    def stub_decide(state, now_ms, round_trip_ms=60.0):
+        return Decision(press_at_ms=now_ms, reason="scheduled", target_deg=200.0,
+                        lands_at_ms=now_ms + round_trip_ms,
+                        fit=Fit(rate_deg_s=330.0, intercept=0.0, rms_deg=2.0, n=20))
+
+    class FakeProc:
+        terminated = False
+        def terminate(self):
+            FakeProc.terminated = True
+        def wait(self, timeout=None):
+            return 0
+
+    written = []          # (path, snapshot) for every write the loop makes
+    real_write = overlay_state.write_state
+
+    def recording_write(snap, path=overlay_state.DEFAULT_PATH):
+        written.append((path, snap))
+        return real_write(snap, path)
+
+    statedir = tempfile.mkdtemp()
+    statepath = os.path.join(statedir, "overlay.json")
+    saved = (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
+             autorun.sleep, autorun.decide, autorun.report_landing, autorun.fire,
+             autorun.start_overlay, overlay_state.write_state)
+    autorun.AI_model = StubModel
+    autorun.Monitoring_window = lambda **kw: StubWindow()
+    autorun.FocusWatcher = lambda **kw: StubWatcher()
+    autorun.sleep = lambda _s: None
+    autorun.decide = stub_decide
+    autorun.report_landing = lambda *a, **kw: autorun.Landing(
+        "measured", round_trip_ms=60.0, verdict="GREAT", error_deg=0.0)
+    autorun.fire = lambda args, wait_ms: 0.0       # never touch the real keyboard
+    autorun.start_overlay = lambda args, log: FakeProc()
+    overlay_state.write_state = recording_write
+    try:
+        autorun.run(autorun.parse_args(
+            ["--no-wide", "--overlay-state", statepath, "--no-check-log",
+             "--no-landing-log", "--link-state", os.path.join(statedir, "link.json")]))
+    finally:
+        (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
+         autorun.sleep, autorun.decide, autorun.report_landing, autorun.fire,
+         autorun.start_overlay, overlay_state.write_state) = saved
+
+    modes = [snap["mode"] for _, snap in written]
+    check("the loop published at all", bool(written), printed[-300:])
+    check("...only to the path it was given",
+          all(path == statepath for path, _ in written), {p for p, _ in written})
+    check("the first write is a forced PAUSED, so stale leftovers are replaced at once",
+          modes[:1] == ["paused"], modes)
+    check("it said ARMED while it was firing", "armed" in modes, modes)
+    check("it ended on STOPPED", modes[-1:] == ["stopped"], modes)
+    check("...and terminated the overlay it started", FakeProc.terminated)
+    armed = [snap for _, snap in written if snap["mode"] == "armed"]
+    check("the capture box it published is the one the bot reads",
+          armed and armed[0]["capture"] == StubWindow.region, armed[:1])
+    check("the file on disk is the stopped snapshot",
+          (overlay_state.read_state(statepath) or {}).get("mode") == "stopped")
+    shutil.rmtree(statedir, ignore_errors=True)
 
 
 def main():
