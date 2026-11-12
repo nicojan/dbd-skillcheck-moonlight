@@ -22,6 +22,7 @@ What keeps it out of the bot's way:
 
 import argparse
 import os
+import signal
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,13 +38,16 @@ from AppKit import (
     NSWindowCollectionBehaviorIgnoresCycle, NSWindowCollectionBehaviorStationary,
     NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel,
 )
-from Foundation import NSObject, NSTimer
+from Foundation import (NSActivityLatencyCritical, NSActivityUserInitiated, NSObject,
+                        NSProcessInfo, NSTimer)
 from time import time
 
 from dbd.utils import overlay_state as ov
 
 PANEL_SIZE = (380, 58)
-POLL_SECONDS = 0.25
+# Fast enough that a capture box that moves on RESUMED is followed within a tenth of a
+# second; the read is a few hundred bytes off the internal disk.
+POLL_SECONDS = 0.1
 
 # Tone -> (r, g, b). Solid fills so the state reads in peripheral vision, white text on top.
 TONES = {
@@ -85,7 +89,8 @@ def _make_panel():
     panel.setBackgroundColor_(NSColor.clearColor())
     panel.setHasShadow_(False)
     panel.setHidesOnDeactivate_(False)
-    panel.setFloatingPanel_(True)
+    # NOT setFloatingPanel_: it resets the level to NSFloatingWindowLevel, silently undoing
+    # the setLevel_ above.
     panel.setBecomesKeyOnlyIfNeeded_(True)
 
     root = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
@@ -114,9 +119,28 @@ class Overlay(NSObject):
         return self
 
     def tick_(self, _timer):
+        # An exception escaping an NSTimer callback is turned into an Objective-C one,
+        # which can take the whole app down or silently stop the timer — and a badge
+        # frozen on its last state is the failure this overlay exists to prevent. So a
+        # bad tick hides the panel and says why, and the next tick tries again.
+        try:
+            self._tick()
+        except Exception as exc:                            # noqa: BLE001
+            self.panel.orderOut_(None)
+            self.last_rect = None
+            print(f"overlay: tick failed ({exc!r}); hidden until the next one",
+                  file=sys.stderr)
+
+    def _tick(self):
+        app = NSApplication.sharedApplication()
         if self.args.parent_pid and not _alive(self.args.parent_pid):
-            NSApplication.sharedApplication().terminate_(None)
+            app.terminate_(None)
             return
+        if app.isActive():
+            # Should be impossible for an accessory app with a non-activating panel. If it
+            # ever happens, keystrokes meant for the game land here while the focus
+            # watcher, which reads window order, still says Moonlight — so hand it back.
+            app.deactivate()
         snap = ov.read_state(self.args.state)
         b = ov.badge(snap, time())
         rect = None
@@ -131,11 +155,18 @@ class Overlay(NSObject):
             self.panel.orderOut_(None)
             self.last_rect = None
             return
-        if rect != self.last_rect:
-            primary_h = NSScreen.screens()[0].frame().size.height
-            x, y, w, h = ov.to_appkit(rect, primary_h)
+        # Every tick, against where the panel REALLY is — not only when the wanted rect
+        # changes. AppKit moves windows itself when displays change, and the primary
+        # screen's height (the flip below) can change with it.
+        # screens()[0] is the menu-bar screen, whose bottom-left is Cocoa's origin and
+        # whose top-left is CGWindowList's — the one screen both conventions share.
+        primary_h = NSScreen.screens()[0].frame().size.height
+        x, y, w, h = ov.to_appkit(rect, primary_h)
+        actual = self.panel.frame()
+        if (actual.origin.x, actual.origin.y, actual.size.width, actual.size.height) \
+                != (x, y, w, h):
             self.panel.setFrame_display_(NSMakeRect(x, y, w, h), True)
-            self.last_rect = rect
+        self.last_rect = rect
         r, g, bl = TONES[b.tone]
         self.root.layer().setBackgroundColor_(Quartz.CGColorCreateSRGB(r, g, bl, ALPHA))
         self.headline.setStringValue_(b.headline)
@@ -165,9 +196,21 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    # Ctrl-C in the terminal goes to the whole foreground process group. autorun ends this
+    # process itself (and it exits on its own when autorun's pid goes), so a SIGINT here
+    # would only print a traceback into the armed log mid-shutdown.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    # Opt out of App Nap. A hidden panel leaves the app with no visible window, and a
+    # napped app's timers are deferred — which would delay both reappearing and noticing
+    # that autorun has gone. Held for the life of the process.
+    activity = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+        NSActivityUserInitiated | NSActivityLatencyCritical, "dbd status overlay")
     overlay = Overlay.alloc().initWithArgs_(args)
+    overlay.activity = activity
+    print(f"overlay: panel level {overlay.panel.level()}, state {args.state}",
+          file=sys.stderr)
     NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
         POLL_SECONDS, overlay, "tick:", None, True)
     overlay.tick_(None)

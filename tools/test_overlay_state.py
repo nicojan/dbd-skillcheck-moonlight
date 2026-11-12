@@ -109,6 +109,34 @@ def test_write_never_raises():
           is False)
 
 
+def test_writer_keeps_only_the_latest_and_writes_final_last():
+    import threading
+    gate = threading.Event()
+    seen = []
+
+    def slow_write(snap, path):
+        gate.wait(2.0)            # hold the first write so later offers pile up
+        seen.append(snap["mode"])
+        return True
+
+    w = ov.StateWriter("unused", write=slow_write)
+    w.offer(ov.snapshot(mode="paused", wall=1.0))
+    for mode in ("armed", "standdown", "disarmed"):
+        w.offer(ov.snapshot(mode=mode, wall=2.0))
+    gate.set()
+    w.close(final=ov.snapshot(mode="stopped", wall=3.0))
+    check("the final snapshot is written last", seen[-1:] == ["stopped"], seen)
+    check("superseded snapshots are dropped, not queued", len(seen) <= 3, seen)
+    check("the thread has exited", not w._thread.is_alive())
+
+
+def test_writer_counts_failures_and_never_raises():
+    w = ov.StateWriter("/dev/null/x/overlay.json")
+    w.offer(ov.snapshot(mode="armed", wall=1.0))
+    w.close()
+    check("a failed write is counted", w.failures == 1, w.failures)
+
+
 # --- what the badge says --------------------------------------------------------------
 
 def test_badge_states():
@@ -124,6 +152,8 @@ def test_badge_states():
         check(f"{mode} is not green", b.tone != "go", b.tone)
     b = ov.badge(ov.snapshot(mode="standdown", wall=now, standdown_left=7.2), now)
     check("stand-down shows seconds left", "7s" in b.headline, b.headline)
+    check("stand-down does not claim the bot has stopped pressing altogether",
+          "still fire" in b.detail, b.detail)
 
 
 def test_badge_stale_and_missing():
@@ -136,6 +166,57 @@ def test_badge_stale_and_missing():
           b.tone != "go" and "NOT RUNNING" in b.headline, b.headline)
     b = ov.badge(ov.snapshot(mode="stopped", wall=100.0), 100.5)
     check("stopped -> not green", b.tone != "go" and "STOPPED" in b.headline, b.headline)
+
+
+def test_badge_never_green_when_nothing_reaches_the_game():
+    now = 50.0
+    for mode in ("armed", "standdown"):
+        b = ov.badge(ov.snapshot(mode=mode, wall=now, dry_run=True), now)
+        check(f"dry run {mode} is not green and says so",
+              b.tone != "go" and "DRY RUN" in b.headline, b)
+        b = ov.badge(ov.snapshot(mode=mode, wall=now, can_press=False), now)
+        check(f"no Accessibility {mode} is not green and says so",
+              b.tone != "go" and "NO KEY ACCESS" in b.headline, b)
+    b = ov.badge(ov.snapshot(mode="armed", wall=now, can_press=None), now)
+    check("unknown access does not block the green", b.tone == "go", b)
+    b = ov.badge(ov.snapshot(mode="armed", wall=now, guard=False), now)
+    check("armed without the key tap is amber, not green", b.tone == "hold", b)
+    b = ov.badge(ov.snapshot(mode="paused", wall=now, dry_run=True), now)
+    check("paused still reads PAUSED in a dry run", b.headline == "PAUSED", b)
+
+
+def test_backwards_clock_is_stale():
+    b = ov.badge(ov.snapshot(mode="armed", wall=100.0), 90.0)
+    check("a snapshot from the future is not believed", b.tone != "go", b)
+
+
+def test_no_predict_never_claims_stand_down():
+    check("without the predictive path nothing is held",
+          ov.bot_mode(active=True, armed=True, performance_until=99.0, now=1.0,
+                      holds_reactive=False) == "armed")
+
+
+def test_poller():
+    import time
+    calls = []
+    p = ov.Poller(lambda: calls.append(1) or True, interval=0.01)
+    deadline = time.time() + 1.0
+    while p.value is None and time.time() < deadline:
+        time.sleep(0.005)
+    p.close()
+    check("poller publishes the read", p.value is True, p.value)
+
+    def boom():
+        raise RuntimeError("x")
+    q = ov.Poller(boom, interval=0.01)
+    time.sleep(0.05)
+    q.close()
+    check("a raising read reads as unknown", q.value is None, q.value)
+
+
+def test_default_path_is_off_the_external_volume():
+    check("state file defaults to the internal disk",
+          ov.DEFAULT_PATH.startswith(os.path.expanduser("~")), ov.DEFAULT_PATH)
 
 
 def test_badge_detail_line():

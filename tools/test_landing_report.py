@@ -1076,18 +1076,27 @@ def test_the_loop_feeds_the_overlay():
         def wait(self, timeout=None):
             return 0
 
-    written = []          # (path, snapshot) for every write the loop makes
-    real_write = overlay_state.write_state
+    written = []          # (path, snapshot) for every snapshot the loop hands over
+    real_writer = overlay_state.StateWriter
 
-    def recording_write(snap, path=overlay_state.DEFAULT_PATH):
-        written.append((path, snap))
-        return real_write(snap, path)
+    class RecordingWriter(real_writer):
+        """The real writer, recording each offer. Asserting on offers rather than on
+        writes keeps this deterministic: the writer may coalesce, the loop may not skip."""
+
+        def offer(self, snap):
+            written.append((self.path, snap))
+            super().offer(snap)
+
+        def close(self, final=None, timeout=2.0):
+            if final is not None:
+                written.append((self.path, final))
+            super().close(final=final, timeout=timeout)
 
     statedir = tempfile.mkdtemp()
     statepath = os.path.join(statedir, "overlay.json")
     saved = (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
              autorun.sleep, autorun.decide, autorun.report_landing, autorun.fire,
-             autorun.start_overlay, overlay_state.write_state)
+             autorun.start_overlay, overlay_state.StateWriter)
     autorun.AI_model = StubModel
     autorun.Monitoring_window = lambda **kw: StubWindow()
     autorun.FocusWatcher = lambda **kw: StubWatcher()
@@ -1097,7 +1106,7 @@ def test_the_loop_feeds_the_overlay():
         "measured", round_trip_ms=60.0, verdict="GREAT", error_deg=0.0)
     autorun.fire = lambda args, wait_ms: 0.0       # never touch the real keyboard
     autorun.start_overlay = lambda args, log: FakeProc()
-    overlay_state.write_state = recording_write
+    overlay_state.StateWriter = RecordingWriter
     try:
         autorun.run(autorun.parse_args(
             ["--no-wide", "--overlay-state", statepath, "--no-check-log",
@@ -1105,7 +1114,7 @@ def test_the_loop_feeds_the_overlay():
     finally:
         (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
          autorun.sleep, autorun.decide, autorun.report_landing, autorun.fire,
-         autorun.start_overlay, overlay_state.write_state) = saved
+         autorun.start_overlay, overlay_state.StateWriter) = saved
 
     modes = [snap["mode"] for _, snap in written]
     check("the loop published at all", bool(written), printed[-300:])

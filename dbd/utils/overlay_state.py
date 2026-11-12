@@ -24,7 +24,11 @@ import json
 import os
 from dataclasses import dataclass
 
-DEFAULT_PATH = os.path.join("state", "overlay.json")
+# On the INTERNAL disk, not in the repo: the repo is on an external volume, and a stall
+# there must not freeze the overlay's read (which runs on its UI thread) at the moment the
+# bot's own writes to the same volume are stalling it too.
+DEFAULT_PATH = os.path.join(os.path.expanduser("~/Library/Caches"), "dbd-skillcheck",
+                            "overlay.json")
 SCHEMA_VERSION = 1
 
 # The loop writes at least every HEARTBEAT_SECONDS. The freeze watch after a fire blocks
@@ -41,14 +45,21 @@ DEFAULT_MARGIN = 16
 CAPTURE_PAD = 24      # points of clear space the panel must keep from the capture box
 
 
-def bot_mode(active, armed, performance_until, now):
-    """The one word the badge shows. Precedence is "least pressing wins"."""
+def bot_mode(active, armed, performance_until, now, holds_reactive=True):
+    """The one word the badge shows. Precedence is "least pressing wins".
+
+    `holds_reactive` is False under `--no-predict`: the Performance guard sits only in the
+    predictive path's reactive branch, so without that path nothing is held and saying
+    STAND DOWN would be a lie.
+    """
 
     if not active:
         return "paused"
     if not armed:
         return "disarmed"
-    if now < performance_until:
+    if holds_reactive and now < performance_until:
+        # ONLY the reactive path holds inside a Performance; a sweeping check that turns
+        # up during one is still fired by the predictive path. The badge says so.
         return "standdown"
     return "armed"
 
@@ -58,10 +69,17 @@ def _round(value, digits):
 
 
 def snapshot(mode, wall, landings=(), reactive=0, standdown_left=None, load=None,
-             fps=None, capture=None, content=None):
+             fps=None, capture=None, content=None, dry_run=False, can_press=None,
+             guard=True):
     """A new, JSON-ready dict describing the bot right now. `wall` is `time.time()`.
 
     Wall-clock rather than monotonic because it is read by another process.
+
+    The three flags are what `mode` cannot say: `dry_run` (presses are logged, never
+    sent), `can_press` (does this process hold Accessibility — False means presses are
+    dropped silently, as after the 2026-10-15 iTerm2 update; None means unknown), and
+    `guard` (is the key tap up — without it there is no backspace toggle and no
+    Performance guard).
     """
 
     if mode not in MODES:
@@ -71,6 +89,9 @@ def snapshot(mode, wall, landings=(), reactive=0, standdown_left=None, load=None
         "v": SCHEMA_VERSION,
         "t": float(wall),
         "mode": mode,
+        "dry_run": bool(dry_run),
+        "can_press": None if can_press is None else bool(can_press),
+        "guard": bool(guard),
         "standdown_left": _round(standdown_left, 1),
         "fires": len(verdicts),
         "great": verdicts.count("GREAT"),
@@ -121,6 +142,98 @@ def read_state(path=DEFAULT_PATH):
     return snap
 
 
+class Poller:
+    """Re-reads a slow fact on its own thread; `.value` is the latest answer.
+
+    For checks too slow for the frame loop — `AXIsProcessTrusted` measures ~160 us here,
+    an IPC to the TCC daemon. `.value` is None until the first read and whenever `read`
+    raises, which the badge treats as unknown rather than as fine or broken.
+    """
+
+    def __init__(self, read, interval=2.0):
+        import threading
+
+        self._read = read
+        self._interval = interval
+        self._stop = threading.Event()
+        self.value = None
+        self._thread = threading.Thread(target=self._run, name="overlay-poller",
+                                        daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while True:
+            try:
+                self.value = self._read()
+            except Exception:                               # noqa: BLE001
+                self.value = None
+            if self._stop.wait(self._interval):
+                return
+
+    def close(self):
+        self._stop.set()
+
+
+def accessibility_trusted():
+    """True/False from macOS, or None where it cannot be asked."""
+
+    try:
+        from HIServices import AXIsProcessTrusted
+    except ImportError:
+        return None
+    return bool(AXIsProcessTrusted())
+
+
+class StateWriter:
+    """Writes snapshots on a background thread, so the armed loop never touches the disk.
+
+    The repo lives on an external volume, and a rename there is usually well under a
+    millisecond but not always — a stall right before a fire would add straight to the
+    frame age the lead is aimed with. `offer` is a lock and an assignment; only the latest
+    snapshot is kept, because an older state is worthless once a newer one exists.
+    """
+
+    def __init__(self, path=DEFAULT_PATH, write=None):
+        import threading
+
+        self.path = path
+        self._write = write or write_state
+        self._cond = threading.Condition()
+        self._pending = None
+        self._closed = False
+        self.failures = 0
+        self._thread = threading.Thread(target=self._run, name="overlay-writer",
+                                        daemon=True)
+        self._thread.start()
+
+    def offer(self, snap):
+        with self._cond:
+            self._pending = snap
+            self._cond.notify()
+
+    def _run(self):
+        while True:
+            with self._cond:
+                while self._pending is None and not self._closed:
+                    self._cond.wait()
+                snap, self._pending = self._pending, None
+                closed = self._closed
+            if snap is not None and not self._write(snap, self.path):
+                self.failures += 1
+            if closed and snap is None:
+                return
+
+    def close(self, final=None, timeout=2.0):
+        """Flush, then write `final` (if given) last. Never raises."""
+
+        with self._cond:
+            if final is not None:
+                self._pending = final
+            self._closed = True
+            self._cond.notify()
+        self._thread.join(timeout=timeout)
+
+
 @dataclass(frozen=True)
 class Badge:
     headline: str
@@ -148,16 +261,29 @@ def badge(snap, now):
     if snap is None:
         return Badge("BOT NOT RUNNING", "stop", "no state file")
     age = now - snap["t"]
-    if age > STALE_SECONDS:
+    # Negative too: after the wall clock steps backwards an old ARMED looks brand new.
+    if age > STALE_SECONDS or age < -1.0:
         return Badge("BOT NOT RESPONDING", "stop", f"no update for {age:.0f}s")
     mode = snap["mode"]
     detail = _detail(snap)
+    if mode in ("armed", "standdown"):
+        # Checked before the mode: either one means nothing reaches the game, so neither
+        # may ever wear the green.
+        if snap.get("dry_run"):
+            return Badge("DRY RUN · NOT PRESSING", "stop", "--dry-run · " + detail)
+        if snap.get("can_press") is False:
+            return Badge("NO KEY ACCESS", "stop",
+                         "presses are dropped: grant the terminal Accessibility · " + detail)
     if mode == "armed":
+        if not snap.get("guard", True):
+            return Badge("ARMED · NO TOGGLE", "hold",
+                         "no key tap: backspace and the 1-2-3-4! guard are off · " + detail)
         return Badge("ARMED", "go", detail)
     if mode == "standdown":
         left = snap.get("standdown_left")
         return Badge("STAND DOWN" + (f" · {left:.0f}s" if left is not None else ""),
-                     "hold", "1-2-3-4! is yours · " + detail)
+                     "hold", "reactive held for 1-2-3-4! · sweeping checks still fire · "
+                     + detail)
     if mode == "disarmed":
         return Badge("DISARMED", "stop", "backspace ×2 to re-arm · " + detail)
     if mode == "paused":

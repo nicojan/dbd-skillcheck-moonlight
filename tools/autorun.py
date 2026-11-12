@@ -1035,7 +1035,10 @@ def start_overlay(args, log):
         proc = subprocess.Popen(
             [sys.executable, script, "--state", args.overlay_state,
              "--corner", args.overlay_corner, "--parent-pid", str(os.getpid())],
-            stdin=subprocess.DEVNULL)
+            stdin=subprocess.DEVNULL,
+            # Out of the terminal's process group, so the operator's Ctrl-C reaches only
+            # autorun, which then ends this process itself in `stop_overlay`.
+            start_new_session=True)
     except OSError as exc:
         log(f"  overlay: could not start ({exc}) — the run goes on without it")
         return None
@@ -1044,19 +1047,36 @@ def start_overlay(args, log):
     return proc
 
 
-def stop_overlay(proc, args):
-    """Mark the run stopped for anything still reading the file, then end the overlay."""
+def stop_overlay(proc, writer, log):
+    """Write STOPPED, then signal the overlay to end. Quick, and never raises.
+
+    Called FIRST in `run`'s `finally` so the badge drops the moment the run stops, but it
+    must not wait there: the lines after it are the run's whole summary, and an operator
+    who presses Ctrl-C again during a wait loses them. The wait is `reap_overlay`, last.
+    """
+
+    try:
+        if writer is not None:
+            writer.close(final=overlay_state.snapshot(mode="stopped", wall=time()),
+                         timeout=0.5)
+        if proc is not None:
+            proc.terminate()
+    except Exception as exc:                                    # noqa: BLE001
+        log(f"  overlay: shutdown failed ({exc!r}) — it exits on its own when this "
+            f"process does")
+
+
+def reap_overlay(proc):
+    """Collect the overlay after the summary is out. Never raises."""
 
     if proc is None:
         return
-    if getattr(args, "overlay_state", None):
-        overlay_state.write_state(overlay_state.snapshot(mode="stopped", wall=time()),
-                                  args.overlay_state)
-    proc.terminate()
     try:
         proc.wait(timeout=2.0)
     except subprocess.TimeoutExpired:
         proc.kill()
+    except Exception:                                           # noqa: BLE001
+        pass
 
 
 def run(args):
@@ -1138,6 +1158,13 @@ def run(args):
     # Active Ability press is how the bot knows to keep its hands off for the next
     # PERFORMANCE_SECONDS. `--record-keys` only decides whether the presses are also
     # WRITTEN to the bout; the guard runs either way.
+    # The other half of the 2026-10-15 failure. Input Monitoring is the TAP's grant and has
+    # its NO TAP line below; Accessibility is the PRESS's grant, and without it pyautogui
+    # drops every press without an error — FIRE lines, landings, nothing in the game.
+    if not args.dry_run and overlay_state.accessibility_trusted() is False:
+        log("  keys: NO ACCESSIBILITY — this terminal cannot press keys; every FIRE below "
+            "will be logged and dropped. Grant it in System Settings > Privacy & "
+            "Security > Accessibility, then restart the run.")
     keys = KeyWatcher(keycodes=(SPACE_KEYCODE, ABILITY_KEYCODE, TOGGLE_KEYCODE))
     if keys.start():
         log(f"  keys: watching SPACE + Active Ability; the reactive path stands down for "
@@ -1257,6 +1284,13 @@ def run(args):
         return crop_at(monitoring.grab_wide(), held.origin, monitoring.geometry)
 
     overlay = start_overlay(args, log)
+    # The disk write happens on this writer's thread; the loop only hands it a dict.
+    overlay_writer = (overlay_state.StateWriter(args.overlay_state)
+                      if overlay is not None else None)
+    # Accessibility, re-read every 2 s off the loop. Without it pyautogui's presses are
+    # dropped without an error, and the log fills with FIREs that never reached the game.
+    access = (overlay_state.Poller(overlay_state.accessibility_trusted)
+              if overlay is not None else None)
 
     def capture_box():
         """The screen rect the bot reads — the overlay must stay clear of all of it."""
@@ -1264,31 +1298,32 @@ def run(args):
         return monitoring.geometry.region if args.wide else monitoring.region
 
     def publish(mode, now, last, force=False):
-        """Feed the overlay. Returns the new `(mode, at)`; a write only on a change or a
-        heartbeat, so the cost is one small file replace a couple of times a second."""
+        """Feed the overlay. Returns the new `(mode, at)`. A snapshot only on a change or a
+        heartbeat, and never a disk write on this thread — see `StateWriter`."""
 
-        if overlay is None:
+        if overlay_writer is None:
             # Nothing reading it. Also what keeps a test that drives `run` from writing
             # the live state file — see `test_landing_report`.
             return last
         if not force and last is not None and last[0] == mode \
                 and now - last[1] < overlay_state.HEARTBEAT_SECONDS:
             return last
-        elapsed = monotonic() - window_start
-        overlay_state.write_state(overlay_state.snapshot(
+        # From the frame-period EWMA, not frames/elapsed: both of those reset on every fire,
+        # so the ratio was blank for a second after each press.
+        overlay_writer.offer(overlay_state.snapshot(
             mode=mode, wall=time(), landings=landings, reactive=reactive_presses,
             standdown_left=max(0.0, performance_until - now) if mode == "standdown" else None,
-            load=load.last, fps=frames / elapsed if active and elapsed > 1.0 else None,
-            capture=capture_box(), content=getattr(monitoring, "content", None)),
-            args.overlay_state)
+            load=load.last, fps=1000.0 / frame_ms if active and frame_ms > 0 else None,
+            capture=capture_box(), content=getattr(monitoring, "content", None),
+            dry_run=args.dry_run, can_press=None if access is None else access.value,
+            guard=keys is not None))
         return (mode, now)
 
     # The first write is forced so the badge never opens on the last run's leftovers.
     published = None          # (mode, monotonic) of the last overlay write
     reactive_presses = 0      # reactive fires, for the overlay's tally only
 
-    if overlay is not None:
-        published = publish("paused", monotonic(), None, force=True)
+    published = publish("paused", monotonic(), None, force=True)
 
     try:
         while True:
@@ -1332,6 +1367,9 @@ def run(args):
                     monitoring.refresh()
                 except WindowNotFoundError as e:
                     log(f"active but window lookup failed: {e}")
+                    # Still paused. Without this the loop can sit here for good and the
+                    # badge, fed by nothing, would flip to BOT NOT RESPONDING.
+                    published = publish("paused", monotonic(), published)
                     sleep(IDLE_POLL_SECONDS)
                     continue
 
@@ -1451,7 +1489,8 @@ def run(args):
             # After the toggle and the Performance guard have both had this frame's keys,
             # so the badge never lags a state change by more than one frame.
             published = publish(overlay_state.bot_mode(active, armed, performance_until,
-                                                       captured), captured, published)
+                                                       captured, holds_reactive=args.predict),
+                                captured, published)
 
             if last_capture is not None:
                 dt = (captured - last_capture) * 1000.0
@@ -1665,7 +1704,9 @@ def run(args):
     finally:
         if not args.dry_run:
             ReleaseKey(SPACE)  # belt and braces: never exit with the key held
-        stop_overlay(overlay, args)
+        stop_overlay(overlay, overlay_writer, log)
+        if access is not None:
+            access.close()
         # The per-check lines scroll past during a match and the log is read afterwards, so
         # the run has to state its own result rather than leaving it to be greped out.
         # Before the landings numbers on purpose: this line decides whether they mean
@@ -1735,6 +1776,7 @@ def run(args):
                 f"read and drain with tools/pull_check_stats.py")
             check_log.close()
         model.cleanup()
+        reap_overlay(overlay)
 
 
 if __name__ == "__main__":
