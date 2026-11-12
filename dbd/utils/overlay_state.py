@@ -45,21 +45,15 @@ DEFAULT_MARGIN = 16
 CAPTURE_PAD = 24      # points of clear space the panel must keep from the capture box
 
 
-def bot_mode(active, armed, performance_until, now, holds_reactive=True):
-    """The one word the badge shows. Precedence is "least pressing wins".
-
-    `holds_reactive` is False under `--no-predict`: the Performance guard sits only in the
-    predictive path's reactive branch, so without that path nothing is held and saying
-    STAND DOWN would be a lie.
-    """
+def bot_mode(active, armed, performance_until, now):
+    """The one word the badge shows. Precedence is "least pressing wins"."""
 
     if not active:
         return "paused"
     if not armed:
         return "disarmed"
-    if holds_reactive and now < performance_until:
-        # ONLY the reactive path holds inside a Performance; a sweeping check that turns
-        # up during one is still fired by the predictive path. The badge says so.
+    if now < performance_until:
+        # Every press site holds inside a Performance (autorun's hold block).
         return "standdown"
     return "armed"
 
@@ -282,8 +276,7 @@ def badge(snap, now):
     if mode == "standdown":
         left = snap.get("standdown_left")
         return Badge("STAND DOWN" + (f" · {left:.0f}s" if left is not None else ""),
-                     "hold", "reactive held for 1-2-3-4! · sweeping checks still fire · "
-                     + detail)
+                     "hold", "1-2-3-4! is yours · bot presses nothing · " + detail)
     if mode == "disarmed":
         return Badge("DISARMED", "stop", "backspace ×2 to re-arm · " + detail)
     if mode == "paused":

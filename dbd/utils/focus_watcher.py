@@ -88,23 +88,26 @@ def stream_window_on_screen(query, min_width=MIN_STREAM_WIDTH, min_height=MIN_ST
     return False
 
 
-def inspect_windows(query, min_width=MIN_STREAM_WIDTH, min_height=MIN_STREAM_HEIGHT):
-    """One window-server query answering both questions at once.
+def _intersects(bounds, box):
+    return not (bounds.get("X", 0) + bounds.get("Width", 0) <= box["left"]
+                or box["left"] + box["width"] <= bounds.get("X", 0)
+                or bounds.get("Y", 0) + bounds.get("Height", 0) <= box["top"]
+                or box["top"] + box["height"] <= bounds.get("Y", 0))
 
-    Returns (frontmost_owner, stream_on_screen). Doing this in a single pass halves the
-    per-frame cost versus calling frontmost_app_name() and stream_window_on_screen()
-    separately, since each of those is its own ~1.09 ms round trip.
+
+def scan_windows(windows, query, min_width=MIN_STREAM_WIDTH, min_height=MIN_STREAM_HEIGHT,
+                 guard_pid=None, guard_box=None):
+    """(frontmost_owner, stream_on_screen, obstructed) from a CGWindowList result. Pure.
+
+    `obstructed` is True when a window owned by `guard_pid` — the status overlay — is on
+    screen and intersects `guard_box`, the region the bot captures. The bot reads the
+    screen, so such a window is IN the frames; see tools/test_overlay_guard.py.
     """
 
-    options = (
-        Quartz.kCGWindowListOptionOnScreenOnly
-        | Quartz.kCGWindowListExcludeDesktopElements
-    )
-    windows = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID) or []
     needle = query.lower()
-
     frontmost = ""
     stream_present = False
+    obstructed = False
 
     for w in windows:
         owner = str(w.get("kCGWindowOwnerName", ""))
@@ -123,7 +126,31 @@ def inspect_windows(query, min_width=MIN_STREAM_WIDTH, min_height=MIN_STREAM_HEI
             if needle in owner.lower() or needle in title.lower():
                 stream_present = True
 
-    return frontmost, stream_present
+        if (guard_pid is not None and guard_box is not None and not obstructed
+                and w.get("kCGWindowOwnerPID") == guard_pid
+                and _intersects(bounds, guard_box)):
+            obstructed = True
+
+    return frontmost, stream_present, obstructed
+
+
+def _on_screen_windows():
+    options = (
+        Quartz.kCGWindowListOptionOnScreenOnly
+        | Quartz.kCGWindowListExcludeDesktopElements
+    )
+    return Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID) or []
+
+
+def inspect_windows(query, min_width=MIN_STREAM_WIDTH, min_height=MIN_STREAM_HEIGHT):
+    """One window-server query answering both questions at once.
+
+    Returns (frontmost_owner, stream_on_screen). Doing this in a single pass halves the
+    per-frame cost versus calling frontmost_app_name() and stream_window_on_screen()
+    separately, since each of those is its own ~1.09 ms round trip.
+    """
+
+    return scan_windows(_on_screen_windows(), query, min_width, min_height)[:2]
 
 
 class FocusWatcher:
@@ -142,6 +169,11 @@ class FocusWatcher:
 
         self._last_check_at = 0.0
         self._last_result = (False, "", False)
+        # Set by autorun once the status overlay is up: its pid, and a callable returning
+        # the capture box (a callable because the box is replaced on every refresh).
+        self.guard_pid = None
+        self.guard_box = None
+        self.last_obstructed = False
 
     def _check(self):
         """(active, frontmost, stream_present), re-queried unless throttling is on."""
@@ -150,7 +182,9 @@ class FocusWatcher:
         if self.deep_check_interval > 0 and now - self._last_check_at < self.deep_check_interval:
             return self._last_result
 
-        frontmost, stream_present = inspect_windows(self.query)
+        box = self.guard_box() if self.guard_box is not None else None
+        frontmost, stream_present, self.last_obstructed = scan_windows(
+            _on_screen_windows(), self.query, guard_pid=self.guard_pid, guard_box=box)
         active = self.query.lower() in frontmost.lower()
         if self.require_on_screen:
             active = active and stream_present

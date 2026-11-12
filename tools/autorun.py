@@ -45,7 +45,8 @@ from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.key_watcher import (ABILITY_KEYCODE, SPACE_KEYCODE, TOGGLE_KEYCODE,
                                    KeyWatcher)
 
-# How long the reactive path stands down after an Active Ability press. A `1-2-3-4!`
+# How long the bot presses NOTHING after an Active Ability press (every press site; until
+# 2026-11-12 only the predictive path's reactive fallback was held). A `1-2-3-4!`
 # Performance runs up to 15 s (the perk's own wording) and the operator plays every beat of
 # it by hand, so a bot press in that window can only ever spoil one: a missed check cancels
 # the whole Performance, and the arcs are ~110 deg with the needle inside for ~367 ms, so
@@ -158,6 +159,10 @@ from dbd.utils.needle_tracker import (
 )
 
 IDLE_POLL_SECONDS = 0.20
+# How long the loop refuses frames for an overlay sitting in the capture box before it
+# shuts the overlay down. Long enough for one geometry change to be followed (the overlay
+# polls every 0.1 s), short enough that a stuck badge costs at most a check or so.
+OVERLAY_GIVE_UP_SECONDS = 2.0
 HIT_COOLDOWN_SECONDS = 0.5
 ANTE_FRONTIER_PRED = 2
 
@@ -1167,7 +1172,7 @@ def run(args):
             "Security > Accessibility, then restart the run.")
     keys = KeyWatcher(keycodes=(SPACE_KEYCODE, ABILITY_KEYCODE, TOGGLE_KEYCODE))
     if keys.start():
-        log(f"  keys: watching SPACE + Active Ability; the reactive path stands down for "
+        log(f"  keys: watching SPACE + Active Ability; the bot presses nothing for "
             f"{PERFORMANCE_SECONDS:.0f}s after an Active Ability press")
         log("  keys: DOUBLE-TAP BACKSPACE disarms and re-arms the bot — no presses while "
             "disarmed, but frames keep recording. Only while the game window is "
@@ -1325,6 +1330,15 @@ def run(args):
 
     published = publish("paused", monotonic(), None, force=True)
 
+    # The end-state check behind `overlay_state.place`: the watcher already walks the
+    # window list every frame, so it also reports any overlay window inside the box.
+    if overlay is not None:
+        watcher.guard_pid = overlay.pid
+        watcher.guard_box = capture_box
+    retired_overlay = None    # an overlay shut down mid-run, reaped with the rest at exit
+    obstructed_since = None   # monotonic start of a run of frames refused for the overlay
+    obstructed_frames = 0
+
     try:
         while True:
             now_active = watcher.is_active()
@@ -1402,6 +1416,30 @@ def run(args):
                 continue
 
             # --- armed loop --------------------------------------------------------
+            if getattr(watcher, "last_obstructed", False):
+                # The overlay is inside the capture box, so this frame would show the bot
+                # its own badge. Refused: no grab, no press. Should never happen —
+                # `place` keeps it clear — but a geometry change can beat the overlay's
+                # poll, and contaminated frames are worse than missing ones.
+                now = monotonic()
+                obstructed_frames += 1
+                if obstructed_since is None:
+                    obstructed_since = now
+                    log("OVERLAY inside the capture box — refusing frames until it moves")
+                elif overlay is not None and now - obstructed_since > OVERLAY_GIVE_UP_SECONDS:
+                    # It is not moving. The match matters more than the badge.
+                    log(f"OVERLAY still inside the capture box after "
+                        f"{OVERLAY_GIVE_UP_SECONDS:.0f}s — shutting it down; the run goes "
+                        f"on without it")
+                    stop_overlay(overlay, overlay_writer, log)
+                    retired_overlay, overlay, overlay_writer = overlay, None, None
+                    watcher.guard_pid, watcher.guard_box = None, None
+                published = publish("paused", now, published)
+                sleep(0.005)
+                continue
+            if obstructed_since is not None:
+                log(f"OVERLAY clear of the capture box — {obstructed_frames} frame(s) refused")
+                obstructed_since = None
             captured = monotonic()
             # The lock lives exactly as long as the track it was taken for. Holding it
             # past the check would keep cropping a patch of floor and never look at the
@@ -1463,9 +1501,12 @@ def run(args):
                 started = performance_deadline(drained, performance_until)
                 if started > performance_until:
                     performance_until = started
-                    log(f"PERFORMANCE: Active Ability pressed — reactive path stands "
-                        f"down for {PERFORMANCE_SECONDS:.0f}s; the operator plays "
-                        f"1-2-3-4! by hand")
+                    log(f"PERFORMANCE: Active Ability pressed — the bot presses nothing "
+                        f"for {PERFORMANCE_SECONDS:.0f}s; the operator plays 1-2-3-4! "
+                        f"by hand")
+                    # As on a disarm: a live track belongs to a check the operator now
+                    # owns, and dropping it silently keeps it out of the `no press` tally.
+                    tracker, track_t0 = None, None
 
                 # `captured` is this frame's `monotonic()`, the same clock the tap stamps
                 # presses with — it is what lets a burst that has gone quiet close.
@@ -1489,8 +1530,7 @@ def run(args):
             # After the toggle and the Performance guard have both had this frame's keys,
             # so the badge never lags a state change by more than one frame.
             published = publish(overlay_state.bot_mode(active, armed, performance_until,
-                                                       captured, holds_reactive=args.predict),
-                                captured, published)
+                                                       captured), captured, published)
 
             if last_capture is not None:
                 dt = (captured - last_capture) * 1000.0
@@ -1509,8 +1549,23 @@ def run(args):
             # exactly the footage this project has never had, and the ring holds only
             # `pre_seconds`, so the recorder has to be told a check is happening or the
             # clip is gone by the time the storm ends.
-            if not armed:
+            #
+            # A `1-2-3-4!` Performance is the same situation and takes the same block, so
+            # it holds ALL THREE press sites — predictive, the predictive path's reactive
+            # fallback, and the wiggle/--no-predict path below. Until 2026-11-12 only the
+            # middle one checked `performance_until`: under --no-predict the bot pressed on
+            # every beat while the log said it was standing down.
+            performing = captured < performance_until
+            if not armed or performing:
                 on_check = should_hit or pred in TRACKED_PREDS
+                if performing and armed and on_check:
+                    stood_down += 1
+                    if captured - last_stand_down > 1.0:
+                        # Rate-limited, never a sleep: a sleep here blinds the loop for
+                        # longer than a needle revolution (the 2026-09-12 bug).
+                        log(f"STAND DOWN: {desc} — 1-2-3-4! Performance, "
+                            f"{performance_until - captured:.1f}s left")
+                        last_stand_down = captured
                 if not on_check:
                     hold_hot_until = None
                 elif recorder is not None:
@@ -1519,8 +1574,9 @@ def run(args):
                         # to the bout's meta every time it is handed one, and a 20 s
                         # storm at 38 fps would write 700 identical rows into bout.json.
                         recorder.trigger({"at": strftime("%H:%M:%S"), "desc": desc,
-                                          "path": "disarmed"})
-                        held_checks += 1
+                                          "path": "disarmed" if not armed
+                                          else "performance"})
+                        held_checks += not armed
                         hold_hot_until = captured + 1.0
                     elif captured >= hold_hot_until:
                         # Bare re-trigger: no meta row, just flush and stay hot. Every
@@ -1529,7 +1585,7 @@ def run(args):
                         recorder.trigger()
                         hold_hot_until = captured + 1.0
                 elif hold_hot_until is None:
-                    held_checks += 1
+                    held_checks += not armed
                     hold_hot_until = captured + 1.0
                 continue
 
@@ -1639,19 +1695,8 @@ def run(args):
 
                 # A fitted check with nowhere to aim (no Great band drawn, or the band
                 # already passed) is exactly the reactive case: pressing on the model's
-                # cue lands in Good, which beats not pressing at all.
-                # Ordered before the reactive branch on purpose: this one wins.
-                elif should_hit and decision.may_react and captured < performance_until:
-                    stood_down += 1
-                    if captured - last_stand_down > 1.0:
-                        # Rate-limited rather than sleeping. A sleep here would be the
-                        # 2026-09-12 bug again: HIT_COOLDOWN_SECONDS blinded the loop for
-                        # longer than a needle revolution. The check is left to the tracker
-                        # so it still files its own NO PRESS line; only the press is held.
-                        log(f"STAND DOWN: {desc} — 1-2-3-4! Performance, "
-                            f"{performance_until - captured:.1f}s left")
-                        last_stand_down = captured
-
+                # cue lands in Good, which beats not pressing at all. (A Performance never
+                # reaches here: the hold block above has already taken the frame.)
                 elif should_hit and decision.may_react:
                     hits += 1
                     reactive_presses += 1
@@ -1759,7 +1804,7 @@ def run(args):
         if keys is not None:
             log(f"  {keys.summary()}")
         if stood_down:
-            log(f"  performance guard: {stood_down} reactive press(es) withheld inside a "
+            log(f"  performance guard: {stood_down} frame(s) of a check held inside a "
                 f"1-2-3-4! Performance")
         if held_checks or not armed:
             # Said whenever it happened at all, and again if the run ENDED disarmed —
@@ -1777,6 +1822,7 @@ def run(args):
             check_log.close()
         model.cleanup()
         reap_overlay(overlay)
+        reap_overlay(retired_overlay)
 
 
 if __name__ == "__main__":

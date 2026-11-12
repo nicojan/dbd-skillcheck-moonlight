@@ -152,8 +152,8 @@ def test_badge_states():
         check(f"{mode} is not green", b.tone != "go", b.tone)
     b = ov.badge(ov.snapshot(mode="standdown", wall=now, standdown_left=7.2), now)
     check("stand-down shows seconds left", "7s" in b.headline, b.headline)
-    check("stand-down does not claim the bot has stopped pressing altogether",
-          "still fire" in b.detail, b.detail)
+    check("stand-down says the bot presses nothing", "presses nothing" in b.detail,
+          b.detail)
 
 
 def test_badge_stale_and_missing():
@@ -188,12 +188,6 @@ def test_badge_never_green_when_nothing_reaches_the_game():
 def test_backwards_clock_is_stale():
     b = ov.badge(ov.snapshot(mode="armed", wall=100.0), 90.0)
     check("a snapshot from the future is not believed", b.tone != "go", b)
-
-
-def test_no_predict_never_claims_stand_down():
-    check("without the predictive path nothing is held",
-          ov.bot_mode(active=True, armed=True, performance_until=99.0, now=1.0,
-                      holds_reactive=False) == "armed")
 
 
 def test_poller():

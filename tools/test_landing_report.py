@@ -1021,6 +1021,198 @@ def test_the_loop_actually_uses_the_shortened_lead():
           leads_seen[2] == autorun.ROUND_TRIP_MS, leads_seen)
 
 
+def _drive_with_keys(extra_args, ability_pressed):
+    """Run the loop over checks the bot would press, optionally after an Active Ability
+    press. Returns (fires, printed)."""
+
+    autorun, printed = capture_log()
+    from dbd.utils.needle_tracker import Decision, Fit
+    from dbd.utils.key_watcher import ABILITY_KEYCODE
+
+    class StubWatcher:
+        last_frontmost = "Moonlight"
+        def is_active(self):
+            return True
+
+    class StubWindow:
+        region = {"left": 0, "top": 0, "width": 224, "height": 224}
+        def describe(self):
+            return "stub"
+        def refresh(self):
+            pass
+
+    # Tracked frames the model says to hit (predictive and its reactive fallback), then a
+    # wiggle frame to hit (the bottom reactive path), each separated by an empty frame.
+    script = ([(1, "repair-heal (out)", True), (0, "none", False)] * 2
+              + [(8, "wiggle", True), (0, "none", False)])
+
+    class StubModel:
+        def __init__(self, **kw):
+            self.calls = 0
+        def check_provider(self):
+            return "stub"
+        def grab_screenshot(self):
+            return np.zeros((224, 224, 3), dtype=np.uint8)
+        def predict(self, frame):
+            if self.calls >= len(script):
+                raise KeyboardInterrupt
+            pred, desc, hit = script[self.calls]
+            self.calls += 1
+            return pred, desc, {desc: 1.0}, hit
+        def cleanup(self):
+            pass
+
+    class StubKeys:
+        error = None
+        def __init__(self, **kw):
+            self.sent = False
+        def start(self):
+            return True
+        def drain(self):
+            if ability_pressed and not self.sent:
+                self.sent = True
+                return [{"t": autorun.monotonic(), "keycode": ABILITY_KEYCODE, "source": 0}]
+            return []
+        def stop(self):
+            pass
+        def summary(self):
+            return "stub keys"
+
+    def stub_decide(state, now_ms, round_trip_ms=60.0):
+        return Decision(press_at_ms=now_ms, reason="scheduled", target_deg=200.0,
+                        lands_at_ms=now_ms + round_trip_ms,
+                        fit=Fit(rate_deg_s=330.0, intercept=0.0, rms_deg=2.0, n=20))
+
+    fires = []
+    saved = (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
+             autorun.sleep, autorun.decide, autorun.report_landing, autorun.fire,
+             autorun.KeyWatcher)
+    autorun.AI_model = StubModel
+    autorun.Monitoring_window = lambda **kw: StubWindow()
+    autorun.FocusWatcher = lambda **kw: StubWatcher()
+    autorun.sleep = lambda _s: None
+    autorun.decide = stub_decide
+    autorun.report_landing = lambda *a, **kw: autorun.Landing(
+        "measured", round_trip_ms=60.0, verdict="GREAT", error_deg=0.0)
+    autorun.fire = lambda args, wait_ms: fires.append(wait_ms) or 0.0
+    autorun.KeyWatcher = StubKeys
+    d = tempfile.mkdtemp()
+    try:
+        autorun.run(autorun.parse_args(
+            ["--no-overlay", "--no-wide", "--no-check-log", "--no-landing-log",
+             "--link-state", os.path.join(d, "link.json")] + extra_args))
+    finally:
+        (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
+         autorun.sleep, autorun.decide, autorun.report_landing, autorun.fire,
+         autorun.KeyWatcher) = saved
+        shutil.rmtree(d, ignore_errors=True)
+    return fires, "\n".join(printed)
+
+
+def test_a_performance_holds_every_press_site():
+    """Until 2026-11-12 only the predictive path's reactive fallback checked the hold.
+
+    Under --no-predict every check goes through the bottom reactive path, and the bot
+    pressed on every beat of a Performance while its own log said it was standing down.
+    Each case runs a CONTROL without the Active Ability press first: a loop that never
+    presses would otherwise pass this test for the wrong reason.
+    """
+    for label, extra in (("predictive", []), ("--no-predict", ["--no-predict"])):
+        control, _ = _drive_with_keys(extra, ability_pressed=False)
+        check(f"{label}: control — without a Performance the bot does press",
+              len(control) >= 2, control)
+        held, printed = _drive_with_keys(extra, ability_pressed=True)
+        check(f"{label}: inside a Performance the bot presses nothing", held == [], held)
+        check(f"{label}: ...and says it stood down", "STAND DOWN" in printed,
+              printed[-400:])
+
+
+def test_the_loop_refuses_frames_with_the_overlay_in_them():
+    """If the overlay is ever in the capture box, those frames are never classified, and
+    an overlay that stays there is shut down rather than allowed to blind the match."""
+
+    autorun, printed = capture_log()
+
+    class StubWatcher:
+        def __init__(self):
+            self.calls = 0
+            self.guard_pid = None
+            self.guard_box = None
+            self.last_obstructed = False
+        last_frontmost = "Moonlight"
+        def is_active(self):
+            self.calls += 1
+            # Obstructed while the guard is set, for the first few frames only — so the
+            # give-up path (which clears the guard) is what ends it.
+            self.last_obstructed = self.guard_pid is not None and self.calls <= 50
+            return True
+
+    class StubWindow:
+        region = {"left": 600, "top": 300, "width": 224, "height": 224}
+        content = {"left": 0, "top": 0, "width": 1512, "height": 850}
+        def describe(self):
+            return "stub"
+        def refresh(self):
+            pass
+
+    predicted = []
+
+    class StubModel:
+        def __init__(self, **kw):
+            pass
+        def check_provider(self):
+            return "stub"
+        def grab_screenshot(self):
+            return np.zeros((224, 224, 3), dtype=np.uint8)
+        def predict(self, frame):
+            predicted.append(watcher.last_obstructed)
+            if len(predicted) >= 3:
+                raise KeyboardInterrupt
+            return 0, "none", {"none": 1.0}, False
+        def cleanup(self):
+            pass
+
+    class FakeProc:
+        pid = 4242
+        terminated = 0
+        def terminate(self):
+            FakeProc.terminated += 1
+        def wait(self, timeout=None):
+            return 0
+
+    watcher = StubWatcher()
+    statedir = tempfile.mkdtemp()
+    saved = (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
+             autorun.sleep, autorun.start_overlay, autorun.OVERLAY_GIVE_UP_SECONDS)
+    autorun.AI_model = StubModel
+    autorun.Monitoring_window = lambda **kw: StubWindow()
+    autorun.FocusWatcher = lambda **kw: watcher
+    autorun.sleep = lambda _s: None
+    autorun.start_overlay = lambda args, log: FakeProc()
+    autorun.OVERLAY_GIVE_UP_SECONDS = 0.0
+    try:
+        autorun.run(autorun.parse_args(
+            ["--no-wide", "--overlay-state", os.path.join(statedir, "o.json"),
+             "--no-check-log", "--no-landing-log",
+             "--link-state", os.path.join(statedir, "link.json")]))
+    finally:
+        (autorun.AI_model, autorun.Monitoring_window, autorun.FocusWatcher,
+         autorun.sleep, autorun.start_overlay, autorun.OVERLAY_GIVE_UP_SECONDS) = saved
+        shutil.rmtree(statedir, ignore_errors=True)
+    text = "\n".join(printed)
+
+    check("the overlay was caught in the box, and its guard cleared on shutdown",
+          watcher.guard_pid is None
+          and "OVERLAY inside the capture box" in text, text[-500:])
+    check("no frame was classified while the overlay was in the box",
+          predicted and not any(predicted), predicted)
+    check("an overlay that stays put is shut down", "shutting it down" in text,
+          text[-500:])
+    check("...exactly once, and not again at exit", FakeProc.terminated == 1,
+          FakeProc.terminated)
+    check("the run then carries on capturing", len(predicted) == 3, predicted)
+
+
 def test_the_loop_feeds_the_overlay():
     """`overlay_state` is tested on its own; this proves `run` actually publishes to it.
 
@@ -1070,6 +1262,7 @@ def test_the_loop_feeds_the_overlay():
                         fit=Fit(rate_deg_s=330.0, intercept=0.0, rms_deg=2.0, n=20))
 
     class FakeProc:
+        pid = 4242
         terminated = False
         def terminate(self):
             FakeProc.terminated = True
