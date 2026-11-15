@@ -41,6 +41,7 @@ from dbd.utils.directkeys import PressKey, ReleaseKey, SPACE
 from dbd.utils import link_state
 from dbd.utils import overlay_state
 from dbd.utils.load_tally import LoadTally
+from dbd.utils.link_ping import DEFAULT_HOST as PING_HOST, LinkPinger
 from dbd.utils.focus_watcher import FocusWatcher
 from dbd.utils.key_watcher import (ABILITY_KEYCODE, SPACE_KEYCODE, TOGGLE_KEYCODE,
                                    KeyWatcher)
@@ -482,6 +483,12 @@ def parse_args(argv=None):
                         "cannot fill the volume mid-match")
     p.add_argument("--no-overlay", dest="overlay", action="store_false",
                    help="do not start the on-stream status badge (tools/overlay.py)")
+    p.add_argument("--no-ping", dest="ping", action="store_false",
+                   help="do not ping the streaming host; fire records then carry no "
+                        "ping_* fields")
+    p.add_argument("--ping-host", default=os.environ.get("DBD_PING_HOST") or PING_HOST,
+                   help="host to ping for the per-fire network covariate "
+                        "(default $DBD_PING_HOST or %(default)s)")
     p.add_argument("--overlay-state", default=overlay_state.DEFAULT_PATH,
                    help="where the armed loop publishes its state for the overlay")
     p.add_argument("--overlay-corner", default=overlay_state.DEFAULT_CORNER,
@@ -1289,6 +1296,13 @@ def run(args):
         return crop_at(monitoring.grab_wide(), held.origin, monitoring.geometry)
 
     overlay = start_overlay(args, log)
+    # The network leg alone, stamped per fire as a covariate — never steers the press.
+    # Guarded on the attribute so a test's fabricated args never spawns a real ping.
+    pinger = None
+    if getattr(args, "ping", False):
+        pinger = LinkPinger(host=args.ping_host)
+        log(f"ping: {args.ping_host}" if pinger.start()
+            else f"ping: could not start ({pinger.error}) — fires carry no ping_* fields")
     # The disk write happens on this writer's thread; the loop only hands it a dict.
     overlay_writer = (overlay_state.StateWriter(args.overlay_state)
                       if overlay is not None else None)
@@ -1665,6 +1679,9 @@ def run(args):
                                  # a reader must treat missing as UNKNOWN, never as quiet.
                                  "load_1min": None if load.last is None
                                  else round(load.last, 2),
+                                 # Absent before 2026-11-14 and on --no-ping
+                                 # runs; None inside means UNKNOWN, never calm.
+                                 **(pinger.snapshot() if pinger is not None else {}),
                                  **where_seen()})
                     if landing is not None:
                         landings.append(landing)
@@ -1757,6 +1774,9 @@ def run(args):
         # Before the landings numbers on purpose: this line decides whether they mean
         # anything, and a verdict printed after the figures is a verdict read too late.
         log(f"  {load.summary()}")
+        if pinger is not None:
+            pinger.stop()
+            log(f"  {pinger.summary()}")
         for line in summarise_landings(landings):
             log(line)
         if no_press:
