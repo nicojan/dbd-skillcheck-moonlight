@@ -416,6 +416,84 @@ def test_a_new_bout_starts_its_own_key_file():
         shutil.rmtree(root)
 
 
+class SleepingClock(FakeClock):
+    """A fake clock whose `sleep` advances it, so a loop that sleeps terminates."""
+
+    def __init__(self):
+        super().__init__()
+        self.slept = 0.0
+
+    def sleep(self, seconds):
+        self.slept += seconds
+        self.advance(seconds)
+
+
+def test_cooldown_without_a_recorder_is_a_plain_sleep():
+    """--record off: the cooldown is exactly the 0.5 s sleep it always was, no grabs."""
+    from dbd.utils.clip_recorder import record_through
+
+    clock = SleepingClock()
+    grabs = []
+    n = record_through(0.5, None, lambda: grabs.append(1) or frame(),
+                       clock=clock, sleep=clock.sleep)
+    check("no recorder: nothing grabbed", grabs == [] and n == 0, (grabs, n))
+    check("no recorder: sleeps the whole cooldown", abs(clock.slept - 0.5) < 1e-9,
+          clock.slept)
+
+
+def test_cooldown_keeps_recording_the_frames_after_a_press():
+    """Why it exists: on 2026-11-25 the first Merciless Storm was lost and the bout could not
+    say why. Every one of 46 presses was followed by a 0.6-1.2 s hole in the recording,
+    because the armed loop slept through HIT_COOLDOWN_SECONDS without capturing, and that
+    hole is exactly where the game shows its verdict (the success flash or the explosion).
+    """
+    from dbd.utils.clip_recorder import record_through
+
+    root = tempfile.mkdtemp()
+    try:
+        clock = SleepingClock()
+        writer = FakeWriter()
+        rec = make(root, clock, writer, post_seconds=1.5)
+        feed(rec, clock, 0.5)
+        rec.trigger({"at": "15:25:58", "desc": "repair-heal (out)", "path": "predictive"})
+        before = len(writer.written)
+        start = clock()
+        n = record_through(0.5, rec, frame, clock=clock, sleep=clock.sleep,
+                           frame_s=0.03)
+        stamps = [t for _, t in writer.written[before:]]
+        check("the cooldown hands frames to the recorder", n >= 15, n)
+        check("...and they are written, since the clip is still hot",
+              len(stamps) == n, (len(stamps), n))
+        check("...stamped in order, across the whole cooldown",
+              stamps == sorted(stamps) and (clock() - start) >= 0.5 - 1e-9,
+              (stamps[:3], clock() - start))
+        check("the cooldown still lasts its full length, not one frame more than it should",
+              0.5 - 1e-9 <= clock() - start < 0.5 + 0.03 + 1e-9, clock() - start)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_failing_grab_never_cuts_the_cooldown_short_or_raises():
+    """The armed loop must not die mid-match because a capture failed during a cooldown."""
+    from dbd.utils.clip_recorder import record_through
+
+    root = tempfile.mkdtemp()
+    try:
+        clock = SleepingClock()
+        rec = make(root, clock, FakeWriter())
+
+        def broken():
+            raise OSError("display went away")
+
+        start = clock()
+        n = record_through(0.5, rec, broken, clock=clock, sleep=clock.sleep)
+        check("a failing grab is swallowed", n == 0, n)
+        check("...and the cooldown still runs to its end",
+              abs((clock() - start) - 0.5) < 1e-9, clock() - start)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     print("clip_recorder")
     for name, fn in sorted(globals().items()):

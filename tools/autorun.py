@@ -147,7 +147,7 @@ def toggle_armed(events, armed, pending=None, now=None):
 
 
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
-from dbd.utils.clip_recorder import (DEFAULT_GAP_SECONDS, DEFAULT_MAX_GB,
+from dbd.utils.clip_recorder import (record_through, DEFAULT_GAP_SECONDS, DEFAULT_MAX_GB,
                                      DEFAULT_POST_SECONDS, DEFAULT_PRE_SECONDS,
                                      ClipRecorder)
 from dbd.utils.wide_capture import Monitoring_wide, SweepTally, crop_at, look
@@ -1176,6 +1176,15 @@ def run(args):
             f"each check, new bout after {args.record_gap:.0f}s quiet, "
             f"cap {args.record_max_gb:.0f} GB")
 
+    def cool_down():
+        """The post-press pause, still feeding the recorder — see `record_through`.
+
+        Same grab client as the loop, so no second capture session. Without --record it
+        is the bare sleep it always was.
+        """
+        record_through(HIT_COOLDOWN_SECONDS, recorder,
+                       monitoring.grab_wide if recorder is not None else None)
+
 
     # The key tap is NOT a recording feature, which is why it is out here rather than
     # under `--record`. The operator plays every `1-2-3-4!` Performance by hand, so the
@@ -1718,7 +1727,7 @@ def run(args):
                             log(f"  lead: {lead_ms:.0f} -> {adapted:.0f} ms")
                         lead_ms = adapted
                     tracker = None
-                    sleep(HIT_COOLDOWN_SECONDS)
+                    cool_down()
                     window_start, last_capture = monotonic(), None
                     frames = 0
 
@@ -1741,7 +1750,7 @@ def run(args):
                         rate_deg_s=None if decision.fit is None
                         else round(decision.fit.rate_deg_s, 1)), "reactive")
                     tracker = None
-                    sleep(HIT_COOLDOWN_SECONDS)
+                    cool_down()
                     window_start, last_capture = monotonic(), None
                     frames = 0
                 continue
@@ -1769,7 +1778,7 @@ def run(args):
                 record_check(reactive_record(desc, confidence, at=strftime("%H:%M:%S")),
                              "reactive")
 
-                sleep(HIT_COOLDOWN_SECONDS)  # don't re-trigger on the same skill check
+                cool_down()  # don't re-trigger on the same skill check
                 window_start, last_capture = monotonic(), None
                 frames = 0
 

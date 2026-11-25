@@ -43,7 +43,7 @@ import os
 import queue
 import threading
 from collections import deque
-from time import monotonic, strftime
+from time import monotonic, sleep as _sleep, strftime
 
 import cv2
 import numpy as np
@@ -64,6 +64,44 @@ BYTES_PER_GB = 1024 ** 3
 # a stall that stops draining it cannot grow it without bound — but if the loop ever ran
 # far faster than expected, age alone would let it. 3 s at 60 fps is 180.
 RING_MAX_FRAMES = 240
+
+
+# The frame period `record_through` grabs at. Close to the armed loop's own ~35 fps, so a
+# cooldown's frames read like the rest of the clip rather than a burst at a different rate.
+COOLDOWN_FRAME_S = 0.028
+
+
+def record_through(seconds, recorder, grab, clock=monotonic, sleep=_sleep,
+                   frame_s=COOLDOWN_FRAME_S):
+    """Sleep `seconds` the way the armed loop's post-press cooldown does, but keep recording.
+
+    The cooldown used to be a bare `sleep(HIT_COOLDOWN_SECONDS)`, so every press left a
+    0.6-1.2 s hole in the bout — 46 of 46 on 2026-11-25 — and the hole is exactly where the
+    game shows its verdict on the press. That is how a lost Merciless Storm went undiagnosable.
+
+    Nothing is detected here; frames only go to `recorder.offer`, stamped with `clock()`
+    taken before the grab, the convention the armed loop uses. With no recorder, or no
+    `grab`, this is the plain sleep it replaced. A grab that raises ends the recording for
+    this cooldown but never the cooldown itself, and never the run. Returns the number of
+    frames offered.
+    """
+
+    end = clock() + seconds
+    if recorder is None or grab is None:
+        sleep(seconds)
+        return 0
+    offered = 0
+    while True:
+        now = clock()
+        if now >= end:
+            return offered
+        try:
+            recorder.offer(grab(), now)
+        except Exception:
+            sleep(max(0.0, end - clock()))
+            return offered
+        offered += 1
+        sleep(min(frame_s, max(0.0, end - clock())))
 
 
 class ClipWriter:
