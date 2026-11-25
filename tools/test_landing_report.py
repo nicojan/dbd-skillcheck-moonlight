@@ -689,6 +689,17 @@ def test_the_lead_level_follows_the_link_and_the_burst_rule_still_runs_on_top():
           autorun.lead_level_ms(base, (5.0,) * 9) == autorun.LEVEL_MIN_MS,
           autorun.lead_level_ms(base, (5.0,) * 9))
 
+    # The ceiling is 80, re-scored seeded 2026-11-25 over 6445 fires: 70 -> 80 is +58 Great
+    # for +1 MISS, and +43 / +0 over the 1314 fires since 11-01, where the link sits at 75-106
+    # and a 70 ms ceiling landed every slow press 10-20 deg late. Past 85 the misses climb
+    # (90: +6, 100: +15) because the slow links are bimodal and the fast mode still lives at
+    # ~70. So the clamp must actually reach 80 on a slow link and stop there.
+    slow = (103.0, 76.0, 110.0, 98.0, 121.0, 74.0, 105.0, 112.0, 96.0)  # median 103
+    check("a slow link lifts the lead to the 80 ms ceiling, not 70",
+          autorun.lead_level_ms(base, slow) == 80.0, autorun.lead_level_ms(base, slow))
+    check("...and no further, because the fast mode of a slow link still lives at ~70",
+          autorun.LEVEL_MAX_MS == 80.0, autorun.LEVEL_MAX_MS)
+
     # Median, not a mean, precisely so a burst survives to reach `lead_for_check`. Three
     # fast readings inside a nine-wide window must not move the level at all — the burst
     # rule is the thing that catches them, and it needs them intact.

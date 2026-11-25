@@ -382,11 +382,23 @@ BURST_TRIP_FLOOR_MS = 20.0
 # Readings the watch could not measure never enter the window at all, which is what keeps
 # this from becoming the LEAD_GAIN mistake below: it cannot walk anywhere on a run of
 # broken measurements, and the clamp bounds it even if they were plausible.
+#
+# THE CEILING WAS 70 AND THE LINK WENT PAST IT. From 11-03 the per-session median trip ran
+# 66-80, and on 11-12, 11-18 and 11-19 it was 102-106 — so the lead sat pinned at 70 and every
+# slow press landed 10-20 deg late, Great -> good (11-19: 7 Great / 27 good, median +13 deg).
+# Re-scored SEEDED (cold-start seed, as it runs) over 6445 gradeable fires, 2026-11-25:
+#   ceiling 70 (was)  4653 Great / 35 MISS       80 (now)  4711 / 36
+#           90        4726 / 41                 100        4747 / 50      110  4751 / 60
+# 80 is +58 Greats for +1 miss (that one in 09-05, an old session); since 11-01 alone it is
+# +43 Greats for no miss. Per session 15 better, 1 worse. 74-82 is a plateau. Past 85 the
+# misses climb because a slow link is BIMODAL — 70-77 and 95-133 ms on 11-25 — and its
+# fast mode still lands early against a lead that followed the slow one. The ceiling is
+# where the cheap part of the slow mode ends, not where the slow mode is.
 LEVEL_WINDOW = 9
 LEVEL_MIN_SAMPLES = 3
 LEVEL_DEADBAND_MS = 8.0
 LEVEL_MIN_MS = 30.0
-LEVEL_MAX_MS = 70.0
+LEVEL_MAX_MS = 80.0
 
 # How long SPACE is held down. This is NOT cosmetic: the press was 5 ms, which a desktop
 # text field registers fine (key events are queued, so duration is irrelevant) but a game
