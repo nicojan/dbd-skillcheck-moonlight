@@ -584,7 +584,7 @@ def fire(args, wait_ms):
 
 
 def play_performance_frame(args, session, frame_bgr, captured, pred, lead_ms, frame_ms,
-                           prior, ring=None):
+                           prior, ring=None, ring_source="this run's ordinary checks"):
     """One frame of `--play-performance`. Returns (session, presses 0 or 1).
 
     Every decision is `perf.session_step` (pure, tested); this owns only the clock, the key
@@ -595,7 +595,7 @@ def play_performance_frame(args, session, frame_bgr, captured, pred, lead_ms, fr
 
     now_ms = monotonic() * 1000.0
     session, p, note = perf.session_step(session, frame_bgr, captured, pred, now_ms,
-                                         lead_ms, frame_ms, prior, ring)
+                                         lead_ms, frame_ms, prior, ring, ring_source)
     if note is not None:
         log(f"PERFORMANCE: {note}")
     if p is None:
@@ -1660,11 +1660,12 @@ def run(args):
                 perf_pred = (pred if not args.wide or seen.origin == monitoring.geometry.centre
                              else 0)
                 try:
+                    perf_ring, perf_ring_source = perf.ring_for_session(ring_centres)
                     perf_session, pressed_now = play_performance_frame(
                         args, perf_session, perf_frame, captured, perf_pred,
                         lead_for_check(lead_level_ms(cold_start_base(
                             lead_ms, recent_trips, seed_ms), recent_trips), last_trip_ms),
-                        frame_ms, CENTRE_PRIOR, perf.known_ring(ring_centres))
+                        frame_ms, CENTRE_PRIOR, perf_ring, perf_ring_source)
                     perf_presses += pressed_now
                 except Exception as exc:
                     # An experimental, opt-in path must never end the run mid-match.

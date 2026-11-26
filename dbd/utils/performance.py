@@ -100,6 +100,12 @@ CONFIRM_FRAMES = 5
 CONFIRM_WINDOW = 8
 LOCATE_RETRY_FRAMES = 4     # a failed ring search waits this many frames before the next
 KNOWN_RING_MIN = 3          # ordinary-check centres needed before `known_ring` is trusted
+# The ring when this run has not measured one: the tracker's own prior and radius. On
+# 2026-11-26 self-location from a Performance's frames came out at (113, 101) r=64 and
+# (114, 102) r=68, and the first lost beat 3's arc on every frame; this prior pressed all
+# three in replay and matches the measured ring on all four 11-25 Performances (same press
+# counts, all in band, no beat unpressed at 70 and 110 ms).
+PRIOR_RING = (CENTRE_PRIOR, 65.0)
 # A Performance RESTS between phrases: 2.3 s with no arc mid-Performance on 11-25 (15:43:17),
 # and the operator's presses on 09-13 had a 3.75 s gap. The lapse only has to catch a
 # cancelled Performance — the staleness guards already stop stale presses — so err long.
@@ -335,8 +341,19 @@ def known_ring(centres, min_count=KNOWN_RING_MIN):
     return (float(np.median(xs)), float(np.median(ys))), float(np.median(rs))
 
 
+def ring_for_session(centres):
+    """(ring, source) for the live player: this run's ordinary checks when there are
+    enough, else `PRIOR_RING`. Never None, so the live player never self-locates — that
+    path (`locate_ring`) stays for `replay_performance.py` without --ring."""
+
+    ring = known_ring(centres)
+    if ring is None:
+        return PRIOR_RING, "the fixed prior (no ordinary checks yet this run)"
+    return ring, "this run's ordinary checks"
+
+
 def session_step(session, frame_bgr, t_s, pred, now_ms, lead_ms, frame_ms,
-                 prior=CENTRE_PRIOR, ring=None):
+                 prior=CENTRE_PRIOR, ring=None, ring_source="this run's ordinary checks"):
     """One frame. Returns (session, plan or None, note or None).
 
     A plan is returned only when a press is DUE within 1.25 frames and every gate passes;
@@ -354,8 +371,8 @@ def session_step(session, frame_bgr, t_s, pred, now_ms, lead_ms, frame_ms,
     note = None
     if session.ring is None and ring is not None:
         session = replace(session, ring=ring)
-        note = (f"ring at ({ring[0][0]:.1f}, {ring[0][1]:.1f}) r={ring[1]:.0f}, from this "
-                f"run's ordinary checks")
+        note = (f"ring at ({ring[0][0]:.1f}, {ring[0][1]:.1f}) r={ring[1]:.0f}, from "
+                f"{ring_source}")
     if session.ring is None:
         locate = (session.locate + (frame_bgr,))[-LOCATE_FRAMES:]
         if len(locate) < LOCATE_FRAMES:

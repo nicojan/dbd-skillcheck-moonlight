@@ -370,6 +370,39 @@ def test_no_ring_means_no_reading_at_all():
     check("...and plans nothing", check_p is None, check_p)
 
 
+def test_without_ordinary_checks_the_ring_is_the_fixed_prior_not_located():
+    """2026-11-26 16:03: no ordinary check had fired, the session located the ring from the
+    Performance's own frames at (113, 101) r=64, and `read_frame` then missed beat 3's arc
+    on every frame — the needle ran through it unpressed. The prior (112, 102) r=65 presses
+    all three in replay, and matches the measured ring on all four 11-25 Performances."""
+    ring, source = perf.ring_for_session(())
+    check("no ordinary checks -> the fixed prior ring", ring == perf.PRIOR_RING, ring)
+    check("...and the log says so", "prior" in source, source)
+    two = ((111.0, 101.0, 66.0), (111.0, 101.0, 66.0))
+    ring, _ = perf.ring_for_session(two)
+    check("fewer than KNOWN_RING_MIN checks -> still the prior", ring == perf.PRIOR_RING, ring)
+
+
+def test_with_ordinary_checks_the_ring_is_theirs():
+    centres = ((111.5, 101.5, 65.0), (111.5, 102.0, 65.0), (111.5, 101.75, 65.0))
+    ring, source = perf.ring_for_session(centres)
+    check("enough ordinary checks -> their median",
+          ring == ((111.5, 101.75), 65.0), ring)
+    check("...and the log says so", "ordinary checks" in source, source)
+
+
+def test_a_given_ring_is_used_from_the_first_frame_and_named_in_the_note():
+    import numpy as np
+    blank = np.zeros((224, 224, 3), dtype=np.uint8)
+    session, _, note = perf.session_step(perf.Session(), blank, 0.0, perf.PERFORMANCE_PREDS[0],
+                                         0.0, LEAD_MS, FRAME_MS, ring=perf.PRIOR_RING,
+                                         ring_source="the fixed prior")
+    check("ring set on the first frame, no locating", session.ring == perf.PRIOR_RING
+          and session.locate == (), (session.ring, len(session.locate)))
+    check("note names where the ring came from", note is not None
+          and "the fixed prior" in note, note)
+
+
 def main():
     print("performance player")
     for name, fn in sorted(globals().items()):
