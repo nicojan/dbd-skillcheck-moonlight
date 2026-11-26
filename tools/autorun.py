@@ -480,11 +480,15 @@ def parse_args(argv=None):
     # `dbd --no-record` turn it back off. Same dest, later flag wins.
     p.add_argument("--no-record", dest="record", action="store_false",
                    help="do not record, overriding an earlier --record")
-    p.add_argument("--record-keys", action="store_true",
-                   help="also log the operator's SPACE presses into each bout, on the "
-                        "same clock as the frames (keys.jsonl). Needs --record and an "
-                        "Input Monitoring grant. For labelling checks the pixels cannot "
-                        "label — see dbd/utils/key_watcher.py")
+    # Default None = follow --record (2026-11-26): every recorded match keeps its key log,
+    # inside the bout, so the post-game review keeps or discards both together.
+    p.add_argument("--record-keys", action="store_true", default=None,
+                   help="log SPACE, Active Ability and backspace presses into each bout, "
+                        "on the same clock as the frames (keys.jsonl). ON whenever "
+                        "--record is; needs an Input Monitoring grant. For labelling "
+                        "checks the pixels cannot label — see dbd/utils/key_watcher.py")
+    p.add_argument("--no-record-keys", dest="record_keys", action="store_false",
+                   help="record frames but not keys.jsonl")
     p.add_argument("--record-pre", type=float, default=DEFAULT_PRE_SECONDS,
                    help="seconds of lead-in kept before each check (ring buffer)")
     p.add_argument("--record-post", type=float, default=DEFAULT_POST_SECONDS,
@@ -517,6 +521,8 @@ def parse_args(argv=None):
     # the model is loaded — a flag that turns out to be impossible should say so before the
     # operator has streamed a game to hear it. `dbd` passes --record ahead of "$@", so this
     # only fires on a deliberate --no-record.
+    if args.record_keys is None:
+        return argparse.Namespace(**{**vars(args), "record_keys": args.record})
     if args.record_keys and not args.record:
         p.error("--record-keys needs --record (it writes into the bout)")
     return args
@@ -1241,13 +1247,12 @@ def run(args):
                 f"beat, landing {perf.LAND_DEG:.0f} deg past the arc's leading edge; "
                 f"press SPACE yourself to take the Performance back")
         if args.record_keys:
-            log("  keys: also writing keys.jsonl, on the frame clock")
-            if not args.dry_run:
-                # Worth saying out loud, because the log will look right either way. The
-                # tap sees synthetic events, so an armed run mixes the bot's own presses
-                # into the same file and every line stops being a label.
-                log("  keys: ARMED — the bot's own presses land in keys.jsonl too; "
-                    "use --dry-run for a clean operator-only record")
+            # The tap sees synthetic events too, so an armed run mixes the bot's presses
+            # into the file; `source` tells them apart (bot 0, hardware 1), which is what
+            # `pair_keys.py` filters on. On by default with --record since 2026-11-26.
+            log("  keys: writing keys.jsonl into each bout, on the frame clock "
+                + ("(bot presses are source 0, yours 1)" if not args.dry_run
+                   else "(dry run: every press is yours)"))
     else:
         # Never fatal — a match is expensive and a missing grant is not worth one. But it
         # must be LOUD, because a guard that silently does nothing is worse than no guard:

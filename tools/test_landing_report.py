@@ -1337,6 +1337,28 @@ def test_the_loop_feeds_the_overlay():
     shutil.rmtree(statedir, ignore_errors=True)
 
 
+def test_record_keys_follows_record():
+    """2026-11-26: every recorded match keeps its key log, so a bout kept in the post-game
+    review always carries the presses that label it; a discarded bout takes them with it."""
+    import autorun
+
+    check("--record alone also records keys",
+          autorun.parse_args(["--record"]).record_keys is True)
+    check("no --record, no key log", autorun.parse_args([]).record_keys is False)
+    check("--no-record-keys turns it off under --record",
+          autorun.parse_args(["--record", "--no-record-keys"]).record_keys is False)
+    check("dbd's --record then the operator's --no-record: no key log, no error",
+          autorun.parse_args(["--record", "--no-record"]).record_keys is False)
+    check("--record-keys still works when passed explicitly",
+          autorun.parse_args(["--record", "--record-keys"]).record_keys is True)
+    try:
+        autorun.parse_args(["--record-keys", "--no-record"])
+        refused = False
+    except SystemExit:
+        refused = True
+    check("an explicit --record-keys without --record is still refused", refused)
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
