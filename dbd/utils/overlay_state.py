@@ -36,7 +36,7 @@ SCHEMA_VERSION = 1
 HEARTBEAT_SECONDS = 0.5
 STALE_SECONDS = 4.0
 
-MODES = ("armed", "standdown", "disarmed", "paused", "stopped")
+MODES = ("armed", "playing", "standdown", "disarmed", "paused", "stopped")
 VERDICTS = ("GREAT", "good", "MISS")
 
 CORNERS = ("top-left", "top-right", "bottom-left", "bottom-right")
@@ -45,16 +45,21 @@ DEFAULT_MARGIN = 16
 CAPTURE_PAD = 24      # points of clear space the panel must keep from the capture box
 
 
-def bot_mode(active, armed, performance_until, now):
-    """The one word the badge shows. Precedence is "least pressing wins"."""
+def bot_mode(active, armed, performance_until, now, playing=False):
+    """The one word the badge shows. Precedence is "least pressing wins".
+
+    `playing`: the --play-performance player is in charge of this Performance (screen
+    confirmed, not handed back, not lapsed). Only then is a Performance window "playing";
+    otherwise it is the operator's, and the badge says stand down."""
 
     if not active:
         return "paused"
     if not armed:
         return "disarmed"
     if now < performance_until:
-        # Every press site holds inside a Performance (autorun's hold block).
-        return "standdown"
+        # Every ordinary press site holds inside a Performance (autorun's hold block);
+        # only the player presses, and only while it is in charge.
+        return "playing" if playing else "standdown"
     return "armed"
 
 
@@ -231,7 +236,7 @@ class StateWriter:
 @dataclass(frozen=True)
 class Badge:
     headline: str
-    tone: str        # go | hold | stop | idle — the overlay maps these to colours
+    tone: str        # go | play | hold | stop | idle — the overlay maps these to colours
     detail: str
 
 
@@ -260,7 +265,7 @@ def badge(snap, now):
         return Badge("BOT NOT RESPONDING", "stop", f"no update for {age:.0f}s")
     mode = snap["mode"]
     detail = _detail(snap)
-    if mode in ("armed", "standdown"):
+    if mode in ("armed", "playing", "standdown"):
         # Checked before the mode: either one means nothing reaches the game, so neither
         # may ever wear the green.
         if snap.get("dry_run"):
@@ -273,6 +278,10 @@ def badge(snap, now):
             return Badge("ARMED · NO TOGGLE", "hold",
                          "no key tap: backspace and the 1-2-3-4! guard are off · " + detail)
         return Badge("ARMED", "go", detail)
+    if mode == "playing":
+        left = snap.get("standdown_left")
+        return Badge("PLAYING 1-2-3-4!" + (f" · {left:.0f}s" if left is not None else ""),
+                     "play", "bot is pressing the beats · hands off SPACE · " + detail)
     if mode == "standdown":
         left = snap.get("standdown_left")
         return Badge("STAND DOWN" + (f" · {left:.0f}s" if left is not None else ""),

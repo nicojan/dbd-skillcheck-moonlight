@@ -52,6 +52,9 @@ POLL_SECONDS = 0.1
 # Tone -> (r, g, b). Solid fills so the state reads in peripheral vision, white text on top.
 TONES = {
     "go": (0.13, 0.62, 0.30),
+    # Blue, not the armed green: the bot is pressing AND the operator must keep off SPACE,
+    # which no other state asks of them.
+    "play": (0.16, 0.42, 0.85),
     "hold": (0.90, 0.55, 0.05),
     "stop": (0.80, 0.15, 0.15),
     "idle": (0.35, 0.35, 0.38),

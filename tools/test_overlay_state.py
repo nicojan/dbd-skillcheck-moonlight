@@ -40,6 +40,15 @@ def test_mode_precedence():
           ov.bot_mode(active=True, armed=True, performance_until=99.0, now=1.0) == "standdown")
     check("Performance over -> armed",
           ov.bot_mode(active=True, armed=True, performance_until=1.0, now=1.0) == "armed")
+    check("inside a Performance the PLAYER is pressing -> playing",
+          ov.bot_mode(active=True, armed=True, performance_until=99.0, now=1.0,
+                      playing=True) == "playing")
+    check("playing never outlives the Performance window",
+          ov.bot_mode(active=True, armed=True, performance_until=1.0, now=1.0,
+                      playing=True) == "armed")
+    check("disarmed still wins over a playing player",
+          ov.bot_mode(active=True, armed=False, performance_until=99.0, now=1.0,
+                      playing=True) == "disarmed")
 
 
 # --- the snapshot ----------------------------------------------------------------------
@@ -154,6 +163,24 @@ def test_badge_states():
     check("stand-down shows seconds left", "7s" in b.headline, b.headline)
     check("stand-down says the bot presses nothing", "presses nothing" in b.detail,
           b.detail)
+
+
+def test_badge_playing_says_the_bot_has_the_beats():
+    """2026-11-26: with --play-performance the badge said STAND DOWN, "bot presses
+    nothing", while the player was pressing every beat."""
+    now = 1000.0
+    b = ov.badge(ov.snapshot(mode="playing", wall=now, standdown_left=9.4), now)
+    check("playing headline names the check", b.headline.startswith("PLAYING 1-2-3-4!"),
+          b.headline)
+    check("...with seconds left", "9s" in b.headline, b.headline)
+    check("...tells the operator to keep off SPACE", "hands off SPACE" in b.detail, b.detail)
+    check("...and never claims the bot presses nothing", "presses nothing" not in b.detail,
+          b.detail)
+    check("...in its own tone, not the armed green", b.tone == "play", b.tone)
+    b = ov.badge(ov.snapshot(mode="playing", wall=now, dry_run=True), now)
+    check("a dry-run player says DRY RUN", "DRY RUN" in b.headline, b.headline)
+    b = ov.badge(ov.snapshot(mode="playing", wall=now, can_press=False), now)
+    check("a player without key access says so", "NO KEY ACCESS" in b.headline, b.headline)
 
 
 def test_badge_stale_and_missing():

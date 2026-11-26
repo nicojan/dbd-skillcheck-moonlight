@@ -1391,7 +1391,8 @@ def run(args):
         # so the ratio was blank for a second after each press.
         overlay_writer.offer(overlay_state.snapshot(
             mode=mode, wall=time(), landings=landings, reactive=reactive_presses,
-            standdown_left=max(0.0, performance_until - now) if mode == "standdown" else None,
+            standdown_left=(max(0.0, performance_until - now)
+                            if mode in ("standdown", "playing") else None),
             load=load.last, fps=1000.0 / frame_ms if active and frame_ms > 0 else None,
             capture=capture_box(), content=getattr(monitoring, "content", None),
             dry_run=args.dry_run, can_press=None if access is None else access.value,
@@ -1619,8 +1620,11 @@ def run(args):
 
             # After the toggle and the Performance guard have both had this frame's keys,
             # so the badge never lags a state change by more than one frame.
-            published = publish(overlay_state.bot_mode(active, armed, performance_until,
-                                                       captured), captured, published)
+            # `perf_session` is last frame's: the badge may trail the player by one frame.
+            published = publish(overlay_state.bot_mode(
+                active, armed, performance_until, captured,
+                playing=(args.play_performance and not perf_handed_back
+                         and perf.is_playing(perf_session))), captured, published)
 
             if last_capture is not None:
                 dt = (captured - last_capture) * 1000.0
