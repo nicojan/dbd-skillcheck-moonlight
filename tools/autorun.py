@@ -147,10 +147,12 @@ def toggle_armed(events, armed, pending=None, now=None):
 
 
 from dbd.utils.monitoring_window import Monitoring_window, WindowNotFoundError
+from dbd.utils import performance as perf
 from dbd.utils.clip_recorder import (record_through, DEFAULT_GAP_SECONDS, DEFAULT_MAX_GB,
                                      DEFAULT_POST_SECONDS, DEFAULT_PRE_SECONDS,
                                      ClipRecorder)
-from dbd.utils.wide_capture import Monitoring_wide, SweepTally, crop_at, look
+from dbd.utils.wide_capture import (Monitoring_wide, SweepTally, centre_slice, crop_at, look,
+                                     to_model_size)
 from check_log import CHECK_DIR, ROTATE_GAP_SECONDS, CheckLog, reactive_record
 from dbd.utils.needle_tracker import (
     AIM_BIAS_DEG, CENTRE_PRIOR, ROUND_TRIP_MS, Reading, TrackerState, aim_bias_for,
@@ -493,6 +495,11 @@ def parse_args(argv=None):
     p.add_argument("--record-max-gb", type=float, default=DEFAULT_MAX_GB,
                    help="stop recording after this much on disk, so a long session "
                         "cannot fill the volume mid-match")
+    p.add_argument("--play-performance", action="store_true",
+                   help="EXPERIMENTAL: inside the 16 s an Active Ability press opens, "
+                        "press each 1-2-3-4! beat instead of standing down. Off by "
+                        "default; the operator pressing SPACE hands the Performance back. "
+                        "See dbd/utils/performance.py")
     p.add_argument("--no-overlay", dest="overlay", action="store_false",
                    help="do not start the on-stream status badge (tools/overlay.py)")
     p.add_argument("--no-ping", dest="ping", action="store_false",
@@ -574,6 +581,30 @@ def fire(args, wait_ms):
     sleep(PRESS_HOLD_SECONDS)
     ReleaseKey(SPACE)
     return pressed_at
+
+
+def play_performance_frame(args, session, frame_bgr, captured, pred, lead_ms, frame_ms,
+                           prior, ring=None):
+    """One frame of `--play-performance`. Returns (session, presses 0 or 1).
+
+    Every decision is `perf.session_step` (pure, tested); this owns only the clock, the key
+    and the log. Presses when a plan falls due within 1.25 frames, the predictive path's own
+    hold-or-fire rule. No freeze watch and no cooldown: the needle never stops on this
+    check, and the 2026-09-12 attempt lost whole revolutions to exactly those two.
+    """
+
+    now_ms = monotonic() * 1000.0
+    session, p, note = perf.session_step(session, frame_bgr, captured, pred, now_ms,
+                                         lead_ms, frame_ms, prior, ring)
+    if note is not None:
+        log(f"PERFORMANCE: {note}")
+    if p is None:
+        return session, 0
+    pressed_at = fire(args, max(0.0, p.press_at_ms - now_ms))
+    log(f"{'WOULD PRESS' if args.dry_run else 'PRESS'} beat: arc entry {p.entry_deg:.0f} "
+        f"deg, {p.rate_deg_s:+.0f} deg/s, lead {lead_ms:.0f} ms, planned to land "
+        f"{p.land_deg:.0f} deg in")
+    return perf.session_pressed(session, pressed_at * 1000.0), 1
 
 
 @dataclass(frozen=True)
@@ -1205,6 +1236,10 @@ def run(args):
         log("  keys: DOUBLE-TAP BACKSPACE disarms and re-arms the bot — no presses while "
             "disarmed, but frames keep recording. Only while the game window is "
             "frontmost. A single backspace, or a burst of them, is text and is ignored.")
+        if args.play_performance:
+            log(f"  PERFORMANCE PLAYER ON (experimental): the bot presses each 1-2-3-4! "
+                f"beat, landing {perf.LAND_DEG:.0f} deg past the arc's leading edge; "
+                f"press SPACE yourself to take the Performance back")
         if args.record_keys:
             log("  keys: also writing keys.jsonl, on the frame clock")
             if not args.dry_run:
@@ -1250,6 +1285,10 @@ def run(args):
     hits = 0
     performance_until = 0.0   # monotonic deadline; the reactive path holds off until then
     stood_down = 0            # presses withheld inside a Performance
+    perf_session = perf.Session()  # --play-performance: the player for THIS window
+    perf_handed_back = False  # the operator pressed SPACE: hands off until it ends
+    ring_centres = ()         # tracker-refined (cx, cy, r) of recent centre-crop checks
+    perf_presses = 0          # beats the player pressed, this run
     last_stand_down = 0.0     # rate-limits the STAND DOWN line to one a second
     armed = True              # a BACKSPACE double-tap flips this; see toggle_armed
     toggle_pending = None     # a burst of backspaces that has not gone quiet yet
@@ -1535,13 +1574,29 @@ def run(args):
                         recorder.note_key(event)
                 started = performance_deadline(drained, performance_until)
                 if started > performance_until:
+                    # A NEW window only when none was running: a second ability press
+                    # inside one extends it but must not reset the player mid-Performance
+                    # (blind for ~8 frames) or undo an operator take-over.
+                    new_window = performance_until <= captured
                     performance_until = started
-                    log(f"PERFORMANCE: Active Ability pressed — the bot presses nothing "
-                        f"for {PERFORMANCE_SECONDS:.0f}s; the operator plays 1-2-3-4! "
-                        f"by hand")
+                    if new_window:
+                        perf_session, perf_handed_back = perf.Session(), False
+                    log("PERFORMANCE: Active Ability pressed — "
+                        + (f"the PLAYER presses the beats for up to "
+                           f"{PERFORMANCE_SECONDS:.0f}s once the screen confirms a "
+                           f"Performance; press SPACE to take it back"
+                           if args.play_performance else
+                           f"the bot presses nothing for {PERFORMANCE_SECONDS:.0f}s; the "
+                           f"operator plays 1-2-3-4! by hand"))
                     # As on a disarm: a live track belongs to a check the operator now
                     # owns, and dropping it silently keeps it out of the `no press` tally.
                     tracker, track_t0 = None, None
+                if (args.play_performance and not perf_handed_back
+                        and captured < performance_until
+                        and perf.operator_pressed_space(drained, SPACE_KEYCODE)):
+                    perf_handed_back = True
+                    log("PERFORMANCE: operator pressed SPACE — the player hands this "
+                        "Performance back and presses nothing until it ends")
 
                 # `captured` is this frame's `monotonic()`, the same clock the tap stamps
                 # presses with — it is what lets a burst that has gone quiet close.
@@ -1591,9 +1646,36 @@ def run(args):
             # middle one checked `performance_until`: under --no-predict the bot pressed on
             # every beat while the log said it was standing down.
             performing = captured < performance_until
+            if (performing and armed and args.play_performance and not perf_handed_back
+                    and frame_bgr is not None):
+                # ONE fixed crop for the whole Performance: the centre slice, never `look`'s
+                # crop, which re-sweeps whenever the centre classifies empty and can hand
+                # back an off-centre or decoy ring that the once-located centre would then
+                # misread. Same source as `tools/replay_performance.py`.
+                perf_frame = (to_model_size(centre_slice(monitoring.last_wide,
+                                                         monitoring.geometry))
+                              if args.wide else frame_bgr)
+                # The class must describe the SAME pixels: `look` may have classified an
+                # off-centre crop on this frame. Then the player gets no class at all (0).
+                perf_pred = (pred if not args.wide or seen.origin == monitoring.geometry.centre
+                             else 0)
+                try:
+                    perf_session, pressed_now = play_performance_frame(
+                        args, perf_session, perf_frame, captured, perf_pred,
+                        lead_for_check(lead_level_ms(cold_start_base(
+                            lead_ms, recent_trips, seed_ms), recent_trips), last_trip_ms),
+                        frame_ms, CENTRE_PRIOR, perf.known_ring(ring_centres))
+                    perf_presses += pressed_now
+                except Exception as exc:
+                    # An experimental, opt-in path must never end the run mid-match.
+                    perf_handed_back = True
+                    log(f"PERFORMANCE: player error ({exc!r}) — hands off for the rest of "
+                        f"this Performance")
             if not armed or performing:
                 on_check = should_hit or pred in TRACKED_PREDS
-                if performing and armed and on_check:
+                playing = (args.play_performance and not perf_handed_back
+                           and perf.is_playing(perf_session))
+                if performing and armed and on_check and not playing:
                     stood_down += 1
                     if captured - last_stand_down > 1.0:
                         # Rate-limited, never a sleep: a sleep here blinds the loop for
@@ -1663,6 +1745,12 @@ def run(args):
                     frame_age_ms = now_ms - tracker.samples[-1].t_ms if tracker.samples else 0.0
                     requested_ms = decision.press_at_ms - now_ms
                     pressed_at = fire(args, requested_ms)
+                    if held is None and tracker.centre_fixed:
+                        # The ring as ordinary checks locate it — what the 1-2-3-4! player
+                        # reads arcs about. See perf.known_ring.
+                        ring_centres = (ring_centres + ((tracker.centre[0],
+                                                         tracker.centre[1],
+                                                         tracker.ring_r),))[-9:]
 
                     fit = decision.fit
                     log(f"{'WOULD FIRE' if args.dry_run else 'FIRE'} predictive: {desc} — "
@@ -1844,6 +1932,9 @@ def run(args):
             keys.stop()
         if keys is not None:
             log(f"  {keys.summary()}")
+        if perf_presses:
+            log(f"  performance player: {perf_presses} beat(s) pressed — whether a "
+                f"Performance PASSED shows nowhere on screen; only the operator can say")
         if stood_down:
             log(f"  performance guard: {stood_down} frame(s) of a check held inside a "
                 f"1-2-3-4! Performance")
