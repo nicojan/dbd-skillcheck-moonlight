@@ -504,6 +504,11 @@ def parse_args(argv=None):
                         "press each 1-2-3-4! beat instead of standing down. Off by "
                         "default; the operator pressing SPACE hands the Performance back. "
                         "See dbd/utils/performance.py")
+    # `dbd` passes --play-performance before "$@" (2026-11-26, after three hands-off
+    # passes), so this is what lets `dbd --no-play-performance` hand 1-2-3-4! back.
+    p.add_argument("--no-play-performance", dest="play_performance", action="store_false",
+                   help="stand down for 1-2-3-4! and let the operator play it, overriding "
+                        "an earlier --play-performance")
     p.add_argument("--no-overlay", dest="overlay", action="store_false",
                    help="do not start the on-stream status badge (tools/overlay.py)")
     p.add_argument("--no-ping", dest="ping", action="store_false",
@@ -701,7 +706,11 @@ def cold_start_base(base_lead_ms, trips, seed_ms,
 
     if seed_ms is None or len(trips) >= min_samples:
         return base_lead_ms
-    return seed_ms
+    # Held to the band the level itself lives in. The stored seed is a raw median, and on
+    # 2026-11-26 a slow evening stored 100-108 ms that went straight to the first fires of
+    # a match whose link was back at 47-54: two early MISSes. Seeded re-score over 6517
+    # fires: 38 -> 32 MISS (13 -> 7 on first-3 fires) for 8 Greats, no session gains one.
+    return min(LEVEL_MAX_MS, max(LEVEL_MIN_MS, seed_ms))
 
 
 def lead_for_check(base_lead_ms, last_trip_ms,

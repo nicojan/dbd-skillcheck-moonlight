@@ -1337,6 +1337,19 @@ def test_the_loop_feeds_the_overlay():
     shutil.rmtree(statedir, ignore_errors=True)
 
 
+def test_play_performance_has_an_off_switch():
+    """2026-11-26: `dbd` passes --play-performance ahead of "$@", so the operator's
+    --no-play-performance must win, the way --no-record does."""
+    import autorun
+
+    check("bare tool: player off", autorun.parse_args([]).play_performance is False)
+    check("--play-performance turns it on",
+          autorun.parse_args(["--play-performance"]).play_performance is True)
+    check("dbd's --play-performance then --no-play-performance: off",
+          autorun.parse_args(["--play-performance", "--no-play-performance"])
+          .play_performance is False)
+
+
 def test_record_keys_follows_record():
     """2026-11-26: every recorded match keeps its key log, so a bout kept in the post-game
     review always carries the presses that label it; a discarded bout takes them with it."""

@@ -80,6 +80,22 @@ def test_the_seed_reaches_only_the_cold_start():
           autorun.cold_start_base(60.0, tuple(range(n + 20)), 36.0) == 60.0)
 
 
+def test_the_seed_is_held_to_the_level_band():
+    """2026-11-26 16:52: a slow evening stored 103 ms, the seed went straight through to
+    the first fires, and the link was back at 47-54 ms — two early MISSes. The level is
+    clamped to [LEVEL_MIN_MS, LEVEL_MAX_MS] everywhere else; the seed now is too.
+    Seeded re-score over 6517 fires: 38 -> 32 MISS for 8 Greats, no session gains a miss."""
+    lo, hi = autorun.LEVEL_MIN_MS, autorun.LEVEL_MAX_MS
+    check("a seed above the ceiling is held to it",
+          autorun.cold_start_base(60.0, (), 103.0) == hi,
+          autorun.cold_start_base(60.0, (), 103.0))
+    check("a seed below the floor is raised to it",
+          autorun.cold_start_base(60.0, (), 12.0) == lo,
+          autorun.cold_start_base(60.0, (), 12.0))
+    check("a seed inside the band is untouched",
+          autorun.cold_start_base(60.0, (), 72.0) == 72.0)
+
+
 def test_no_seed_changes_nothing():
     check("None leaves the constant alone",
           autorun.cold_start_base(60.0, (), None) == 60.0)
